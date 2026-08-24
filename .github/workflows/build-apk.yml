@@ -1,0 +1,371 @@
+name: Universal Android APK Builder
+
+on:
+  workflow_dispatch:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # ============================================================
+      # 2. 查找并解压 ZIP
+      # ============================================================
+      - name: Find and extract project ZIP
+        shell: bash
+        run: |
+          set -e
+
+回声"=========================================="
+echo"寻找Android项目ZIP"
+回声"=========================================="
+
+zip_FILE=$(find. -maxdepth2-type f\
+\(-iname"*.zip"-o-iname"*.ZIP"\)\
+！-路径"./.git/*"\
+|head-1)
+
+如果[-z"$ZIP_FILE"]；则
+echo"❌ 未找到ZIP文件"
+出口1
+Fi
+
+echo"✅ 找到：$zip_FILE"
+
+RM-rf项目
+mkdir-p项目
+
+unzip-q-o"$ZIP_FILE"-d项目
+
+echo"✅ ZIP解压完成"
+
+回显"项目文件结构："
+find project-max depth3-type f|head-100
+
+      #============================================================
+      #3.自动寻找安卓工程根目录
+      #============================================================
+      - name: Detect Android project
+        id: detect
+        shell: bash
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "自动识别 Android 工程"
+          echo "=========================================="
+
+          ROOT=""
+
+          # 优先寻找 settings.gradle / settings.gradle.kts
+          while IFS= read -r file; do
+            DIR=$(dirname "$file")
+
+            if find "$DIR" -maxdepth 2 \
+              -type d -name "app" | grep -q .; then
+              ROOT="$DIR"
+              break
+            fi
+          done < <(
+            find project \
+              -type f \
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+              ! -path "*/build/*" \
+              | sort
+          )
+
+          # 如果没有 settings.gradle，寻找 build.gradle
+          if [ -z "$ROOT" ]; then
+            while IFS= read -r file; do
+              DIR=$(dirname "$file")
+
+              if find "$DIR" -maxdepth 2 \
+                -type d -name "app" | grep -q .; then
+                ROOT="$DIR"
+                break
+              fi
+            done < <(
+              find project \
+                -type f \
+                \( -name "build.gradle" -o -name "build.gradle.kts" \) \
+                ! -path "*/build/*" \
+                | sort
+            )
+          fi
+
+          if [ -z "$ROOT" ]; then
+            echo "❌ 无法识别 Android 工程"
+            echo ""
+            echo "搜索结果："
+            find project \
+              \( -name "settings.gradle*" -o -name "build.gradle*" \) \
+              -print
+            exit 1
+          fi
+
+          echo "ANDROID_ROOT=$ROOT" >> "$GITHUB_ENV"
+
+          echo "✅ Android 工程：$ROOT"
+
+          echo "工程目录："
+          ls -la "$ROOT"
+
+      # ============================================================
+      # 4. 自动识别 Gradle Wrapper
+      # ============================================================
+      - name: Detect Gradle
+        shell: bash
+        run: |
+          set -e
+
+          cd "$ANDROID_ROOT"
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            echo "✅ 使用项目自带 Gradle Wrapper"
+
+          elif [ -f "./gradle/wrapper/gradle-wrapper.properties" ]; then
+            echo "❌ 找到 Gradle Wrapper 配置，但 gradlew 缺失"
+            exit 1
+
+          else
+            echo "ℹ️ 项目没有 Gradle Wrapper"
+            echo "将使用 GitHub Actions 提供的 Gradle"
+          fi
+
+      # ============================================================
+      # 5. 设置 JDK
+      # ============================================================
+      - name: Setup JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # ============================================================
+      # 6. Android SDK
+      # ============================================================
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+          echo "✅ Android SDK 安装完成"
+
+      # ============================================================
+      # 7. 自动选择 Gradle
+      # ============================================================
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      # ============================================================
+      # 8. 自动生成 gradle.properties
+      # ============================================================
+      - name: Prepare Gradle properties
+        shell: bash
+        run: |
+          set -e
+
+          cd "$ANDROID_ROOT"
+
+          touch gradle.properties
+
+          if ! grep -q "android.suppressUnsupportedCompileSdk" gradle.properties; then
+            echo "android.suppressUnsupportedCompileSdk=35" >> gradle.properties
+          fi
+
+          echo "org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8" >> gradle.properties
+
+          echo "✅ Gradle 配置完成"
+
+      # ============================================================
+      # 9. 自动寻找 Android Application 模块
+      # ============================================================
+      - name: Detect application module
+        id: module
+        shell: bash
+        run: |
+          set -e
+
+          cd "$ANDROID_ROOT"
+
+          APP_MODULE=""
+
+          # 优先 app
+          if [ -d "app" ]; then
+            if [ -f "app/build.gradle" ] || \
+               [ -f "app/build.gradle.kts" ]; then
+              APP_MODULE="app"
+            fi
+          fi
+
+          # 如果没有 app，则搜索 application 模块
+          if [ -z "$APP_MODULE" ]; then
+            while IFS= read -r file; do
+
+              if grep -qE \
+                'com\.android\.application|com\.android\.application\.kotlin' \
+                "$file"; then
+
+                DIR=$(dirname "$file")
+                APP_MODULE="${DIR#./}"
+                break
+              fi
+
+            done < <(
+              find . \
+                -name "build.gradle" \
+                -o -name "build.gradle.kts" \
+                | sort
+            )
+          fi
+
+          if [ -z "$APP_MODULE" ]; then
+            echo "❌ 没找到 Android Application 模块"
+            exit 1
+          fi
+
+          echo "APP_MODULE=$APP_MODULE" >> "$GITHUB_ENV"
+
+          echo "✅ Application 模块：$APP_MODULE"
+
+      # ============================================================
+      # 10. 自动检测 compileSdk
+      # ============================================================
+      - name: Analyze Android project
+        shell: bash
+        run: |
+          set -e
+
+          cd "$ANDROID_ROOT"
+
+          echo "=========================================="
+          echo "Android 项目分析"
+          echo "=========================================="
+
+          echo "工程：$ANDROID_ROOT"
+          echo "模块：$APP_MODULE"
+
+          echo ""
+          echo "Gradle："
+          grep -R \
+            -E "com.android.application|com.android.library|compileSdk|targetSdk" \
+            --include="*.gradle" \
+            --include="*.gradle.kts" \
+            . 2>/dev/null \
+            | head -50 || true
+
+      # ============================================================
+      # 11. 构建 APK
+      # ============================================================
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$ANDROID_ROOT"
+
+          echo "=========================================="
+          echo "开始构建 APK"
+          echo "=========================================="
+
+          if [ -f "./gradlew" ]; then
+
+            ./gradlew \
+              clean \
+              ":$APP_MODULE:assembleDebug" \
+              --stacktrace \
+              --no-daemon
+
+          else
+
+            gradle \
+              clean \
+              ":$APP_MODULE:assembleDebug" \
+              --stacktrace \
+              --no-daemon
+
+          fi
+
+          echo "✅ APK 构建完成"
+
+      # ============================================================
+      # 12. 自动寻找 APK
+      # ============================================================
+      - name: Find APK
+        id: apk
+        shell: bash
+        run: |
+          set -e
+
+          cd "$ANDROID_ROOT"
+
+安装包=$(查找。\
+-type f\
+-name"*.apk"\
+-Path“*/build/outputs/apk/*/*.apk”\
+[
+如果
+
+|sort\"$APK"]；则[-z"$APK"]；则
+回声"❌ 没找到安装包""❌ 没找到安装包"
+回显“”
+回声"所有安装包：""所有安装包："
+find. -键入f-name"*.apk"-print"*.apk"-print
+出口1
+Fi
+
+回声"APK_PATH=$ANDROID_ROOT/$APK">"$GITHUB_ENV""APK_PATH=$ANDROID_ROOT/$APK">"$GITHUB_ENV"
+
+回声"==========================================""=========================================="
+回声"安装包：$安装包""安装包：$安装包"
+回声"==========================================""=========================================="
+
+#============================================================#============================================================
+      #13.统一复制安装包#13.统一复制安装包
+#============================================================#============================================================
+      - 姓名: 收集安装包姓名: 收集安装包
+壳: 猛击: 猛击
+跑：|: |
+set-E
+
+mkdir-p工件
+
+CP"$APK_PATH"\"$APK_PATH"\
+"项目/app-debug.apk"
+
+回声"✅ 安装包已收集""✅ APK已收集"
+
+LS-lh伪影/
+
+#============================================================#============================================================
+      #14.上传安装包#14.上传安装包
+#============================================================#============================================================
+      - 姓名: 上传安装包姓名: 上传安装包
+uses：操作/上载工件@v4: 操作/上载工件@v4
+和……一起::
+姓名：android-apk: android-apk
+路径: 工件/*.安装包: 工件/*.安装包
+如果未找到文件：误差

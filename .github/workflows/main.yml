@@ -7,303 +7,114 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     permissions:
       contents: write
 
     steps:
-      # ==============================
-      # 1. Checkout
-      # ==============================
       - name: Checkout
         uses: actions/checkout@v5
 
-      # ==============================
-      # 2. 自动选择最高版本 ZIP
-      # ==============================
-      - name: Detect latest ZIP
-        id: zip
-        shell: bash
+      # ⭐ 自动识别并解压 ZIP 文件
+      - name: Auto-detect and unzip ZIP file
+        id: unzip
         run: |
-          set -euo pipefail
-
-          echo "📦 搜索根目录 ZIP..."
-
-          mapfile -t ZIPS < <(find . -maxdepth 1 -type f -name "*.zip" -printf "%f\n" | sort -V)
-
-          if [ "${#ZIPS[@]}" -eq 0 ]; then
-            echo "❌ 根目录没有找到 ZIP 文件"
+          # 查找根目录下的第一个 .zip 文件
+          ZIP_FILE=$(ls *.zip 2>/dev/null | head -1)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "❌ 未找到任何 .zip 文件"
             exit 1
           fi
+          echo "✅ 找到 ZIP 文件: $ZIP_FILE"
+          echo "ZIP_NAME=$ZIP_FILE" >> $GITHUB_OUTPUT
 
-          echo "发现以下 ZIP："
-          printf ' - %s\n' "${ZIPS[@]}"
-
-          ZIP_FILE="${ZIPS[-1]}"
-
-          echo ""
-          echo "✅ 选择最高版本 ZIP：$ZIP_FILE"
-
-          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_OUTPUT"
-
-      # ==============================
-      # 3. 验证 ZIP 完整性
-      # ==============================
-      - name: Validate ZIP
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ZIP_FILE="${{ steps.zip.outputs.ZIP_FILE }}"
-
-echo"🔍 检查ZIP：$ZIP_FILE"
-
-          if ! unzip -t "$ZIP_FILE"; then
-回显“”
-echo"❌ ZIP文件损坏或不是完整ZIP"
-            echo "❌ 请重新上传源码压缩包"
-出口1
-Fi
-
-echo"✅ ZIP完整性检查通过"
-
-      #==============================
-      # 4. 解压
-      #==============================
-      - 姓名: 解压缩源
-壳: 猛击
-跑: |
-set-euo管道故障
-
-          ZIP_FILE="${{ steps.zip.outputs.ZIP_FILE }}"
-
-mkdir-p源
-
-          unzip -o "$ZIP_FILE" -d source
-
+          # 解压（-o 覆盖，-d . 解压到当前目录）
+          unzip -o "$ZIP_FILE" -d .
           echo "✅ 解压完成"
 
-          echo ""
-          echo "📂 解压后的目录："
-          find source -maxdepth 2 -type f | head -100
-
-      # ==============================
-      # 5. 自动定位 Android 工程
-      # ==============================
-      - name: Locate Android project
-        id: project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ROOT=""
-
-          # 优先查找 settings.gradle.kts
-          FOUND=$(find source -type f \
-            \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
-            -print | sort | head -1)
-
-          if [ -n "$FOUND" ]; then
-            ROOT=$(dirname "$FOUND")
-          fi
-
-          if [ -z "$ROOT" ]; then
-            echo "❌ 未找到 settings.gradle 或 settings.gradle.kts"
-            echo ""
-            echo "当前目录结构："
-            find source -maxdepth 4 -type f | head -200
-            exit 1
-          fi
-
-          echo "ROOT=$ROOT" >> "$GITHUB_OUTPUT"
-
-          echo "✅ Android 工程根目录：$ROOT"
-
-      # ==============================
-      # 6. 覆盖 QuantApp.kt
-      # ==============================
+      # 用仓库根目录的 QuantApp.kt 覆盖解压出来的旧文件（如果存在）
       - name: Replace QuantApp.kt if exists
-        shell: bash
         run: |
-          set -euo pipefail
-
-          if [ ! -f ./QuantApp.kt ]; then
-            echo "ℹ️ 根目录没有 QuantApp.kt"
-            echo "ℹ️ 使用 ZIP 中原始版本"
-            exit 0
-          fi
-
-          TARGET=$(find "${{ steps.project.outputs.ROOT }}" \
-            -path "*/app/src/main/java/com/quant/app/ui/QuantApp.kt" \
-            -type f \
-            | head -1)
-
-          if [ -n "$TARGET" ]; then
-            cp -fv ./QuantApp.kt "$TARGET"
-            echo "✅ 已覆盖：$TARGET"
+          if [ -f ./QuantApp.kt ]; then
+            # 自动查找解压后的 app 源码路径（最多两层）
+            TARGET=$(find . -maxdepth 3 -path "*/app/src/main/java/com/quant/app/ui/QuantApp.kt" 2>/dev/null | head -1)
+            if [ -n "$TARGET" ]; then
+              cp -v ./QuantApp.kt "$TARGET"
+              echo "✅ 已覆盖 $TARGET"
+            else
+              echo "⚠️ 未找到目标 QuantApp.kt，跳过覆盖"
+            fi
           else
-            echo "⚠️ 没有找到目标 QuantApp.kt"
-            echo "⚠️ 跳过覆盖"
+            echo "⚠️ 仓库根目录没有 QuantApp.kt，使用 ZIP 中的原始版本"
           fi
 
-      # ==============================
-      # 7. JDK 17
-      # ==============================
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
 
-      # ==============================
-      # 8. Android SDK
-      # ==============================
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Install SDK components
-        shell: bash
         run: |
-          set -euo pipefail
-
           yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
-
-          echo "✅ Android SDK 准备完成"
-
-      # ==============================
-      # 9. Gradle
-      # ==============================
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      # ==============================
-      # 10. Build APK
-      # ==============================
+      # 清理缓存并自动定位工程根目录构建
       - name: Build Debug APK
         id: build
-        shell: bash
         run: |
-          set -euo pipefail
-
-          ROOT="${{ steps.project.outputs.ROOT }}"
-
-          cd "$ROOT"
-
-          echo "================================"
-          echo "🚀 开始构建 Android APK"
-          echo "================================"
-
-          echo ""
-          echo "📂 当前工程："
-          pwd
-
-          echo ""
-          echo "📄 Gradle 文件："
-          ls -la
-
-          # ------------------------------
-          # 优先使用项目自己的 Gradle Wrapper
-          # ------------------------------
-          if [ -f "./gradlew" ]; then
-
-            echo ""
-            echo "✅ 使用项目 Gradle Wrapper"
-
-            chmod +x ./gradlew
-
-            ./gradlew \
-              clean \
-              assembleDebug \
-              --stacktrace \
-              --no-daemon
-
+          set -e
+          # 寻找 settings.gradle（支持嵌套）
+          ROOT=""
+          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
+            ROOT="."
           else
-
-            echo ""
-            echo "⚠️ 未找到 gradlew"
-            echo "✅ 使用 GitHub Actions 安装的 Gradle 8.9"
-
-            gradle \
-              clean \
-              assembleDebug \
-              --stacktrace \
-              --no-daemon
-
+            FOUND=$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then
+              ROOT=$(dirname "$FOUND")
+            fi
           fi
 
-          # ==============================
-          # 11. 查找 APK
-          # ==============================
-
-          echo ""
-          echo "🔍 搜索 APK..."
-
-          mapfile -t APKS < <(
-            find . \
-              -type f \
-              -path "*/build/outputs/apk/debug/*.apk" \
-              | sort
-          )
-
-          if [ "${#APKS[@]}" -eq 0 ]; then
-            echo "❌ 构建完成但没有找到 APK"
+          if [ -z "$ROOT" ]; then
+            echo "❌ 未找到 settings.gradle，请确认 ZIP 包含 Android 工程"
             exit 1
           fi
 
-          echo ""
-          echo "找到 APK："
+          echo "✅ 工程根目录: $ROOT"
+          cd "$ROOT"
 
-          printf ' - %s\n' "${APKS[@]}"
+          # 清除 Gradle 缓存
+          rm -rf .gradle
+          rm -rf ~/.gradle/caches/
 
-          APK="${APKS[0]}"
+          # 构建
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            ./gradlew clean assembleDebug --stacktrace --refresh-dependencies
+          else
+            gradle clean assembleDebug --stacktrace --refresh-dependencies
+          fi
 
-姓名
-          echo "✅ 使用 APK：$APK"
-
-          # ==============================
-          # 12. 保存 Artifact
-          # ==============================
+          # 收集 APK
+          APK=$(find . -path "*/outputs/apk/debug/*.apk" -type f | head -1)
+          if [ -z "$APK" ]; then
+            echo "❌ 未找到 APK"
+            exit 1
+          fi
 
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "$APK" "$GITHUB_WORKSPACE/artifacts/app-debug.apk"
 
-          cp -fv "$APK" \
-            "$GITHUB_WORKSPACE/artifacts/app-debug.apk"
-
-          # ==============================
-          # 13. 构建信息
-          # ==============================
-
-          cat > "$GITHUB_WORKSPACE/artifacts/build-info.txt" <<EOF
-          Build Time: $(date '+%Y-%m-%d %H:%M:%S UTC')
-          ZIP: ${{ steps.zip.outputs.ZIP_FILE }}
-          Project Root: $ROOT
-          APK: $APK
-          Gradle: 8.9
-          JDK: 17
-          Android SDK: 35
-          EOF
-
-          echo ""
-          echo "================================"
-          echo "🎉 APK 构建完成"
-          echo "================================"
-
-      # ==============================
-      # 14. 上传 APK
-      # ==============================
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: quant-app-debug
-          path: |
-            artifacts/app-debug.apk
-            artifacts/build-info.txt
-if-no-files-found:error
+          path: artifacts/app-debug.apk
+          if-no-files-found: error

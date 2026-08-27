@@ -15,63 +15,59 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 自动识别并解压根目录第一个 .zip
       - name: Auto-detect and unzip ZIP file
         id: unzip
         run: |
           set -euo pipefail
           ZIP_FILE=$(ls *.zip 2>/dev/null | head -1 || true)
           if [ -z "$ZIP_FILE" ]; then
-            echo "❌ 未找到任何 .zip 文件（请把源码 ZIP 放在仓库根目录）"
+            echo "No zip file found in repo root"
             exit 1
           fi
-          echo "✅ 找到 ZIP: $ZIP_FILE"
+          echo "Found ZIP: $ZIP_FILE"
           echo "ZIP_NAME=$ZIP_FILE" >> "$GITHUB_OUTPUT"
           unzip -o "$ZIP_FILE" -d .
-          echo "✅ 解压完成"
+          echo "Unzip done"
 
-      # 可选：覆盖 QuantApp.kt（其他项目用；彩分析可忽略）
       - name: Replace QuantApp.kt if exists
         run: |
           set -euo pipefail
           if [ -f ./QuantApp.kt ]; then
             TARGET=$(find . -maxdepth 5 -path "*/app/src/main/java/*/QuantApp.kt" 2>/dev/null | head -1 || true)
-如果[-n"$TARGET"]；则
-CP-v./QuantApp.kt"$TARGET"
-echo"✅ 已覆盖$TARGET"
-其他
-echo"⚠️ 未找到目标QuantApp.kt，跳过"
-Fi
-其他
-echo"i️ 无QuantApp.kt，使用ZIP内源码"
-Fi
+            if [ -n "$TARGET" ]; then
+              cp -v ./QuantApp.kt "$TARGET"
+              echo "Replaced $TARGET"
+            else
+              echo "QuantApp.kt target not found, skip"
+            fi
+          else
+            echo "No QuantApp.kt at root, use ZIP source"
+          fi
 
-      - 姓名: 设置JDK17
-uses: 操作/设置-java@v4
-和……一起:
-分布: temurin
-java版: '17'
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-      - 姓名: 安装Android SDK
-uses: android-actions/setup-android@v3
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      - 姓名: 安装SDK组件
-跑: |
-set-euo管道故障
-yes|sdkmanager--licenses>/dev/null||true
-sdkmanager"平台；android-35""构建工具；35.0.0""平台工具"
+      - name: Install SDK components
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          gradle-version: "8.9"
 
       - name: Build Debug APK
         id: build
         run: |
           set -euo pipefail
-
-          # 定位工程根目录（支持 ZIP 解压后嵌套一层）
           ROOT=""
           if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
             ROOT="."
@@ -81,19 +77,13 @@ sdkmanager"平台；android-35""构建工具；35.0.0""平台工具"
               ROOT=$(dirname "$FOUND")
             fi
           fi
-
           if [ -z "$ROOT" ]; then
-            echo "❌ 未找到 settings.gradle / settings.gradle.kts"
-            find . -maxdepth 3 -type f -name "settings.gradle*" || true
+            echo "settings.gradle not found"
             exit 1
           fi
-
-          echo "✅ 工程根目录: $ROOT"
+          echo "Project root: $ROOT"
           cd "$ROOT"
-
-          # 清理本工程 Gradle 缓存（不要清全局 \~/.gradle，避免每次全量下载）
           rm -rf .gradle
-
           if [ -f ./gradlew ]; then
             sed -i 's/\r$//' ./gradlew || true
             chmod +x ./gradlew
@@ -101,20 +91,15 @@ sdkmanager"平台；android-35""构建工具；35.0.0""平台工具"
           else
             gradle --no-daemon clean assembleDebug --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/gradle-build.log"
           fi
-
           APK=$(find . -path "*/outputs/apk/debug/*.apk" -type f | head -1 || true)
           if [ -z "$APK" ]; then
-姓名
-查找-路径"*/outputs/apk/*"-type f2>/dev/null||true
-出口1
-Fi
+            echo "Debug APK not found"
+            exit 1
+          fi
+          echo "APK: $APK"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "$APK" "$GITHUB_WORKSPACE/artifacts/app-debug.apk"
 
-echo"✅ APK: $安装包"
-mkdir-p"$GITHUB_WORKSPACE/工件"
-CP"$APK" "$GITHUB_WORKSPACE/artifacts/app-debug.apk"
-LS-lh"$GITHUB_WORKSPACE/artifacts/app-debug.apk"
-
-      # 把 APK 打成 ZIP，方便下载
       - name: Package APK as ZIP
         run: |
           set -euo pipefail

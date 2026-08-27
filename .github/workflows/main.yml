@@ -7,114 +7,141 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
-      # ⭐ 自动识别并解压 ZIP 文件
+      # 自动识别并解压根目录第一个 .zip
       - name: Auto-detect and unzip ZIP file
         id: unzip
         run: |
-          # 查找根目录下的第一个 .zip 文件
-          ZIP_FILE=$(ls *.zip 2>/dev/null | head -1)
+          set -euo pipefail
+          ZIP_FILE=$(ls *.zip 2>/dev/null | head -1 || true)
           if [ -z "$ZIP_FILE" ]; then
-            echo "❌ 未找到任何 .zip 文件"
+            echo "❌ 未找到任何 .zip 文件（请把源码 ZIP 放在仓库根目录）"
             exit 1
           fi
-          echo "✅ 找到 ZIP 文件: $ZIP_FILE"
-          echo "ZIP_NAME=$ZIP_FILE" >> $GITHUB_OUTPUT
-
-          # 解压（-o 覆盖，-d . 解压到当前目录）
+          echo "✅ 找到 ZIP: $ZIP_FILE"
+          echo "ZIP_NAME=$ZIP_FILE" >> "$GITHUB_OUTPUT"
           unzip -o "$ZIP_FILE" -d .
           echo "✅ 解压完成"
 
-      # 用仓库根目录的 QuantApp.kt 覆盖解压出来的旧文件（如果存在）
+      # 可选：覆盖 QuantApp.kt（其他项目用；彩分析可忽略）
       - name: Replace QuantApp.kt if exists
         run: |
+          set -euo pipefail
           if [ -f ./QuantApp.kt ]; then
-            # 自动查找解压后的 app 源码路径（最多两层）
-            TARGET=$(find . -maxdepth 3 -path "*/app/src/main/java/com/quant/app/ui/QuantApp.kt" 2>/dev/null | head -1)
-            if [ -n "$TARGET" ]; then
-              cp -v ./QuantApp.kt "$TARGET"
-              echo "✅ 已覆盖 $TARGET"
-            else
-              echo "⚠️ 未找到目标 QuantApp.kt，跳过覆盖"
-            fi
-          else
-            echo "⚠️ 仓库根目录没有 QuantApp.kt，使用 ZIP 中的原始版本"
-          fi
+            TARGET=$(find . -maxdepth 5 -path "*/app/src/main/java/*/QuantApp.kt" 2>/dev/null | head -1 || true)
+如果[-n"$TARGET"]；则
+CP-v./QuantApp.kt"$TARGET"
+echo"✅ 已覆盖$TARGET"
+其他
+echo"⚠️ 未找到目标QuantApp.kt，跳过"
+Fi
+其他
+echo"i️ 无QuantApp.kt，使用ZIP内源码"
+Fi
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
+      - 姓名: 设置JDK17
+uses: 操作/设置-java@v4
+和……一起:
+分布: temurin
+java版: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - 姓名: 安装Android SDK
+uses: android-actions/setup-android@v3
 
-      - name: Install SDK components
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+      - 姓名: 安装SDK组件
+跑: |
+set-euo管道故障
+yes|sdkmanager--licenses>/dev/null||true
+sdkmanager"平台；android-35""构建工具；35.0.0""平台工具"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      # 清理缓存并自动定位工程根目录构建
       - name: Build Debug APK
         id: build
         run: |
-          set -e
-          # 寻找 settings.gradle（支持嵌套）
+          set -euo pipefail
+
+          # 定位工程根目录（支持 ZIP 解压后嵌套一层）
           ROOT=""
           if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
             ROOT="."
           else
-            FOUND=$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) 2>/dev/null | head -1)
+            FOUND=$(find . -maxdepth 3 \( -name settings.gradle.kts -o -name settings.gradle \) 2>/dev/null | head -1 || true)
             if [ -n "$FOUND" ]; then
               ROOT=$(dirname "$FOUND")
             fi
           fi
 
           if [ -z "$ROOT" ]; then
-            echo "❌ 未找到 settings.gradle，请确认 ZIP 包含 Android 工程"
+            echo "❌ 未找到 settings.gradle / settings.gradle.kts"
+            find . -maxdepth 3 -type f -name "settings.gradle*" || true
             exit 1
           fi
 
           echo "✅ 工程根目录: $ROOT"
           cd "$ROOT"
 
-          # 清除 Gradle 缓存
+          # 清理本工程 Gradle 缓存（不要清全局 \~/.gradle，避免每次全量下载）
           rm -rf .gradle
-          rm -rf ~/.gradle/caches/
 
-          # 构建
           if [ -f ./gradlew ]; then
+            sed -i 's/\r$//' ./gradlew || true
             chmod +x ./gradlew
-            ./gradlew clean assembleDebug --stacktrace --refresh-dependencies
+            ./gradlew --no-daemon clean assembleDebug --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/gradle-build.log"
           else
-            gradle clean assembleDebug --stacktrace --refresh-dependencies
+            gradle --no-daemon clean assembleDebug --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/gradle-build.log"
           fi
 
-          # 收集 APK
-          APK=$(find . -path "*/outputs/apk/debug/*.apk" -type f | head -1)
+          APK=$(find . -path "*/outputs/apk/debug/*.apk" -type f | head -1 || true)
           if [ -z "$APK" ]; then
-            echo "❌ 未找到 APK"
-            exit 1
-          fi
+姓名
+查找-路径"*/outputs/apk/*"-type f2>/dev/null||true
+出口1
+Fi
 
-          mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          cp "$APK" "$GITHUB_WORKSPACE/artifacts/app-debug.apk"
+echo"✅ APK: $安装包"
+mkdir-p"$GITHUB_WORKSPACE/工件"
+CP"$APK" "$GITHUB_WORKSPACE/artifacts/app-debug.apk"
+LS-lh"$GITHUB_WORKSPACE/artifacts/app-debug.apk"
 
-      - name: Upload APK
+      # 把 APK 打成 ZIP，方便下载
+      - name: Package APK as ZIP
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/artifacts"
+          zip -9 caifenxi-debug.zip app-debug.apk
+          ls -lh caifenxi-debug.zip
+
+      - name: Upload ZIP
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: quant-app-debug
+          name: caifenxi-debug-zip
+          path: artifacts/caifenxi-debug.zip
+          if-no-files-found: error
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: caifenxi-debug-apk
           path: artifacts/app-debug.apk
           if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-build-log
+          path: gradle-build.log
+如果未找到文件：忽略

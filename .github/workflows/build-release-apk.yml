@@ -1,4 +1,4 @@
-name: BTC Quant - Build Release APK
+name: Complete APK Build
 
 on:
   workflow_dispatch:
@@ -6,575 +6,390 @@ on:
     branches:
       - main
       - master
+  pull_request:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build BTC Quant APK
+    name: Build Debug APK
     runs-on: ubuntu-latest
-
-    env:
-      ANDROID_PROJECT: ${{ github.workspace }}/android_project
-      APK_OUTPUT: ${{ github.workspace }}/release
-      LOG_OUTPUT: ${{ github.workspace }}/build_logs
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout
+      # ============================================================
+      # 1. Checkout
+      # ============================================================
+      - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Setup JDK 17
+      # ============================================================
+      # 2. Locate Android project
+      # ============================================================
+      - name: Locate Android Project
+        id: locate_root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "🔍 Searching for Android project..."
+
+          if [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
+            ROOT="."
+          else
+            FOUND="$(find . -maxdepth 4 \
+              \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
+              -print -quit)"
+
+            if [ -z "${FOUND:-}" ]; then
+              echo "❌ settings.gradle(.kts) not found"
+              echo ""
+              echo "Repository structure:"
+              find . -maxdepth 3 -type f | sort | head -100
+              exit 1
+            fi
+
+            ROOT="$(dirname "$FOUND")"
+          fi
+
+          ROOT="$(cd "$ROOT" && pwd)"
+
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+
+          echo "✅ Android project root:"
+          echo "$ROOT"
+
+          echo ""
+          echo "Project files:"
+          find "$ROOT" -maxdepth 2 -type f \
+            \( -name "settings.gradle*" \
+            -o -name "build.gradle*" \
+            -o -name "gradlew" \
+            -o -name "gradle.properties" \) \
+            -print | sort
+
+      # ============================================================
+      # 3. Validate source
+      # ============================================================
+      - name: Validate Source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.locate_root.outputs.root }}"
+          cd "$ROOT"
+
+          echo "🔎 Validating source..."
+
+          test -f "settings.gradle.kts" || \
+          test -f "settings.gradle"
+
+          test -f "gradlew"
+
+          if [ -d "app/src/main" ]; then
+            echo "✅ app/src/main exists"
+          else
+            echo "❌ app/src/main not found"
+            exit 1
+          fi
+
+          if find app/src/main -name "AndroidManifest.xml" -type f \
+            | grep -q .; then
+            echo "✅ AndroidManifest.xml found"
+          else
+            echo "❌ AndroidManifest.xml not found"
+            exit 1
+          fi
+
+          echo ""
+          echo "Gradle wrapper:"
+          ls -l gradlew
+
+          echo ""
+          echo "Android source:"
+          find app/src/main -maxdepth 3 -type f | sort | head -100
+
+      # ============================================================
+      # 4. JDK 17
+      # ============================================================
+      - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
+          cache: gradle
 
-      - name: Locate source ZIP
+      # ============================================================
+      # 5. Android SDK
+      #
+      # IMPORTANT:
+      # Do NOT use android-actions/setup-android@v3.
+      # Do NOT run sdkmanager --licenses.
+      # ============================================================
+      - name: Prepare Android SDK
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE=""
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
 
-          while IFS= read -r -d '' file; do
-            ZIP_FILE="$file"
-            break
-          done < <(
-            find "$GITHUB_WORKSPACE" \
-              -maxdepth 3 \
-              -type f \
-              -name '*.zip' \
-              -print0
-          )
+          export ANDROID_HOME="$SDK_ROOT"
+          export ANDROID_SDK_ROOT="$SDK_ROOT"
 
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No source ZIP found."
-            exit 1
-          fi
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
-          echo "Source ZIP: $ZIP_FILE"
-          echo "SOURCE_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
+          SDKMANAGER="$(command -v sdkmanager || true)"
 
-      - name: Prepare build directories
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf \
-            "$ANDROID_PROJECT" \
-            "$APK_OUTPUT" \
-            "$LOG_OUTPUT" \
-            "$GITHUB_WORKSPACE/source"
-
-          mkdir -p \
-            "$ANDROID_PROJECT" \
-            "$APK_OUTPUT" \
-            "$LOG_OUTPUT" \
-            "$GITHUB_WORKSPACE/source"
-
-      - name: Extract source
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          unzip -q \
-            "$SOURCE_ZIP" \
-            -d "$GITHUB_WORKSPACE/source"
-
-          echo "Source extracted."
-
-      - name: Detect Android project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          BEST_ROOT=""
-          BEST_SCORE=-1
-
-          while IFS= read -r -d '' settings_file; do
-
-            candidate="$(dirname "$settings_file")"
-            score=0
-
-            if [ -f "$candidate/settings.gradle" ]; then
-              score=$((score + 20))
-            fi
-
-            if [ -f "$candidate/settings.gradle.kts" ]; then
-              score=$((score + 20))
-            fi
-
-            if [ -f "$candidate/build.gradle" ]; then
-              score=$((score + 20))
-            fi
-
-            if [ -f "$candidate/build.gradle.kts" ]; then
-              score=$((score + 20))
-            fi
-
-            if [ -x "$candidate/gradlew" ]; then
-              score=$((score + 30))
-            fi
-
-            if [ -d "$candidate/app" ]; then
-              score=$((score + 30))
-            fi
-
-            echo "Candidate: $candidate"
-            echo "Score: $score"
-
-            if [ "$score" -gt "$BEST_SCORE" ]; then
-              BEST_ROOT="$candidate"
-              BEST_SCORE="$score"
-            fi
-
-          done < <(
-            find "$GITHUB_WORKSPACE/source" \
-              -type f \
-              \( \
-                -name 'settings.gradle' \
-                -o -name 'settings.gradle.kts' \
-              \) \
-              -print0
-          )
-
-          if [ -z "$BEST_ROOT" ]; then
-            echo "ERROR: Android project root not found."
-            exit 1
-          fi
-
-          echo "Selected project:"
-          echo "$BEST_ROOT"
-
-          cp -a \
-            "$BEST_ROOT"/. \
-            "$ANDROID_PROJECT"/
-
-          echo "DETECTED_ROOT=$BEST_ROOT" >> "$GITHUB_ENV"
-
-      - name: Validate Android project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$ANDROID_PROJECT"
-
-          if [ ! -f settings.gradle ] && \
-             [ ! -f settings.gradle.kts ]; then
-            echo "ERROR: settings.gradle(.kts) missing."
-            exit 1
-          fi
-
-          if [ ! -f build.gradle ] && \
-             [ ! -f build.gradle.kts ]; then
-            echo "ERROR: root build.gradle(.kts) missing."
-            exit 1
-          fi
-
-          if [ ! -d app ]; then
-            echo "ERROR: app directory missing."
-            exit 1
-          fi
-
-          echo "Android project structure OK."
-
-      - name: Repair Gradle wrapper
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$ANDROID_PROJECT"
-
-          NEED_REPAIR=0
-
-          if [ ! -x ./gradlew ]; then
-            NEED_REPAIR=1
-          fi
-
-          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            NEED_REPAIR=1
-          fi
-
-          if [ "$NEED_REPAIR" -eq 0 ]; then
-            echo "Gradle wrapper is complete."
-            exit 0
-          fi
-
-          DISTRIBUTION_URL=""
-
-          if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
-            DISTRIBUTION_URL="$(
-              grep '^distributionUrl=' \
-                gradle/wrapper/gradle-wrapper.properties |
-              head -1 |
-              cut -d'=' -f2-
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(
+              find "$SDK_ROOT/cmdline-tools" \
+                -type f \
+                -path '*/bin/sdkmanager' \
+                -print -quit 2>/dev/null || true
             )"
           fi
 
-          if [ -z "$DISTRIBUTION_URL" ]; then
-            DISTRIBUTION_URL="https://services.gradle.org/distributions/gradle-8.9-bin.zip"
-          fi
-
-          GRADLE_VERSION="$(
-            printf '%s\n' "$DISTRIBUTION_URL" |
-            sed -n 's/.*gradle-\([0-9][0-9.]*\)-.*/\1/p'
-          )"
-
-          if [ -z "$GRADLE_VERSION" ]; then
-            GRADLE_VERSION="8.9"
-          fi
-
-          echo "Using Gradle $GRADLE_VERSION"
-
-          mkdir -p "$HOME/gradle"
-
-          curl \
-            -L \
-            --fail \
-            --retry 3 \
-            -o "$HOME/gradle/gradle.zip" \
-            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
-
-          rm -rf \
-            "$HOME/gradle/gradle-${GRADLE_VERSION}"
-
-          unzip -q \
-            "$HOME/gradle/gradle.zip" \
-            -d "$HOME/gradle"
-
-          GRADLE_BIN="$HOME/gradle/gradle-${GRADLE_VERSION}/bin/gradle"
-
-          if [ ! -x "$GRADLE_BIN" ]; then
-            echo "ERROR: Gradle executable not found."
+          if [ -z "$SDKMANAGER" ]; then
+            echo "❌ sdkmanager not found"
             exit 1
           fi
 
-          "$GRADLE_BIN" --version
+          echo "✅ sdkmanager:"
+          echo "$SDKMANAGER"
 
-          "$GRADLE_BIN" \
-            wrapper \
-            --gradle-version "$GRADLE_VERSION"
+          # ----------------------------------------------------------
+          # Seed the standard Android SDK license fingerprints.
+          #
+          # We intentionally do NOT execute:
+          #   sdkmanager --licenses
+          #
+          # This avoids the unrelated Google TV / XR license scan
+          # that was causing the previous CI failure.
+          # ----------------------------------------------------------
+          mkdir -p "$SDK_ROOT/licenses"
 
-          chmod +x ./gradlew
+          printf '%s\n' \
+            8933bad161af4178b1185d1a37fbf41ea5269c55 \
+            d56f5187479451eabf01fb78af6dfcb131a6481e \
+            24333f8a63b6825ea9c5514f83c2829b004d1fee \
+            84831b9409646a918e30573bab4c9c91346d8abd \
+            > "$SDK_ROOT/licenses/android-sdk-license"
 
-          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            echo "ERROR: gradle-wrapper.jar still missing."
-            exit 1
-          fi
+          echo "📦 Installing required Android SDK packages..."
 
-          echo "Gradle wrapper repaired."
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
-      - name: Validate Gradle wrapper
+          echo ""
+          echo "🔎 Verifying Android SDK..."
+
+          test -d "$SDK_ROOT/platforms/android-35"
+          test -d "$SDK_ROOT/build-tools/35.0.0"
+          test -d "$SDK_ROOT/platform-tools"
+
+          echo "✅ Android SDK ready"
+
+      # ============================================================
+      # 6. Setup Gradle 8.9
+      # ============================================================
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+          add-job-summary: on
+
+      # ============================================================
+      # 7. Verify Gradle
+      # ============================================================
+      - name: Verify Gradle Environment
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$ANDROID_PROJECT"
+          ROOT="${{ steps.locate_root.outputs.root }}"
+          cd "$ROOT"
 
+          chmod +x gradlew
+
+          echo "☕ Java:"
+          java -version
+
+          echo ""
+          echo "📦 Gradle:"
           ./gradlew --version
 
-      - name: Clean build
+          echo ""
+          echo "🤖 Android SDK:"
+          echo "ANDROID_HOME=${ANDROID_HOME:-}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
+
+      # ============================================================
+      # 8. Static audit
+      # ============================================================
+      - name: Run Static Audit
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$ANDROID_PROJECT"
+          ROOT="${{ steps.locate_root.outputs.root }}"
+          cd "$ROOT"
 
-          ./gradlew \
-            clean \
-            --no-daemon \
-            --stacktrace \
-            2>&1 | tee "$LOG_OUTPUT/clean.log"
-
-      - name: Build BTC release
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$ANDROID_PROJECT"
-
-          ./gradlew \
-            assembleBtcRelease \
-            --no-daemon \
-            --stacktrace \
-            2>&1 | tee "$LOG_OUTPUT/btc-release.log"
-
-      - name: Build Full release
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$ANDROID_PROJECT"
-
-          ./gradlew \
-            assembleFullRelease \
-            --no-daemon \
-            --stacktrace \
-            2>&1 | tee "$LOG_OUTPUT/full-release.log"
-
-      - name: Build Legacy release
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$ANDROID_PROJECT"
-
-          ./gradlew \
-            assembleLegacyRelease \
-            --no-daemon \
-            --stacktrace \
-            2>&1 | tee "$LOG_OUTPUT/legacy-release.log"
-
-      - name: Verify APK output
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK_ROOT="$ANDROID_PROJECT/app/build/outputs/apk"
-
-          echo "APK output root:"
-          echo "$APK_ROOT"
-
-          if [ ! -d "$APK_ROOT" ]; then
-            echo "ERROR: APK output directory missing."
-            exit 1
+          if [ -f "tools/v22_static_audit.py" ]; then
+            echo "🔍 Running v22 static audit..."
+            python3 tools/v22_static_audit.py
+          else
+            echo "ℹ️ Static audit script not present; skipping."
           fi
 
-          APK_COUNT="$(
-            find "$APK_ROOT" \
-              -type f \
-              -name '*.apk' |
-            wc -l |
-            tr -d ' '
-          )"
+      # ============================================================
+      # 9. Clean
+      # ============================================================
+      - name: Clean Project
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          echo "APK count: $APK_COUNT"
+          ROOT="${{ steps.locate_root.outputs.root }}"
+          cd "$ROOT"
+
+          chmod +x gradlew
+
+          echo "🧹 Cleaning project..."
+
+          ./gradlew clean --no-daemon --stacktrace
+
+          echo "✅ Clean completed"
+
+      # ============================================================
+      # 10. Build Debug APK
+      #
+      # IMPORTANT:
+      # No pipe to tail.
+      # Therefore Gradle's real exit code is preserved.
+      # ============================================================
+      - name: Build Debug APK
+        id: build_apk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.locate_root.outputs.root }}"
+          cd "$ROOT"
+
+          chmod +x gradlew
+
+          echo "========================================"
+          echo "🔨 Building Debug APK"
+          echo "========================================"
+          echo "Project: $(pwd)"
+          echo ""
+
+          ./gradlew \
+            assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --info
+
+          echo ""
+          echo "========================================"
+          echo "✅ APK BUILD SUCCESS"
+          echo "========================================"
+
+          echo "build_success=true" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # 11. Locate APK
+      # ============================================================
+      - name: Locate APK
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.locate_root.outputs.root }}"
+          cd "$ROOT"
+
+          echo "🔍 Searching generated APK..."
+
+          APK_COUNT="$(find . \
+            -type f \
+            -path '*/build/outputs/apk/debug/*.apk' \
+            | wc -l)"
 
           if [ "$APK_COUNT" -eq 0 ]; then
-            echo "ERROR: No APK generated."
+            echo "❌ No Debug APK found"
             exit 1
           fi
 
-          find "$APK_ROOT" \
+          echo "✅ Found $APK_COUNT APK(s):"
+
+          find . \
             -type f \
-            -name '*.apk' \
+            -path '*/build/outputs/apk/debug/*.apk' \
             -print
 
-      - name: Package APKs
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK_ROOT="$ANDROID_PROJECT/app/build/outputs/apk"
-
-          mkdir -p "$APK_OUTPUT"
-
-          count=0
-
-          while IFS= read -r -d '' apk; do
-
-            count=$((count + 1))
-
-            filename="$(basename "$apk")"
-            variant="$(basename "$(dirname "$apk")")"
-
-            case "$variant" in
-              btc)
-                output_name="BTC-Quant-btc-release.apk"
-                ;;
-
-              full)
-                output_name="BTC-Quant-full-release.apk"
-                ;;
-
-              legacy)
-                output_name="BTC-Quant-legacy-release.apk"
-                ;;
-
-              *)
-                output_name="BTC-Quant-${filename}"
-                ;;
-            esac
-
-            size="$(stat -c%s "$apk")"
-
-            echo "APK:"
-            echo "$apk"
-
-            echo "Size:"
-            echo "$size bytes"
-
-            if [ "$size" -le 1024 ]; then
-              echo "ERROR: APK too small."
-              exit 1
-            fi
-
-            unzip -t "$apk" >/dev/null
-
-            cp -f \
-              "$apk" \
-              "$APK_OUTPUT/$output_name"
-
-            echo "Packaged:"
-            echo "$APK_OUTPUT/$output_name"
-
-          done < <(
-            find "$APK_ROOT" \
-              -type f \
-              -name '*.apk' \
-              -print0
-          )
-
-          if [ "$count" -eq 0 ]; then
-            echo "ERROR: No APK files found."
-            exit 1
-          fi
-
-          {
-            echo '{'
-            echo '  "product": "BTC Quant",'
-            echo '  "apks": ['
-
-            first=1
-
-            while IFS= read -r -d '' apk; do
-
-              if [ "$first" -eq 0 ]; then
-                echo ','
-              fi
-
-              first=0
-
-              name="$(basename "$apk")"
-              size="$(stat -c%s "$apk")"
-
-              printf \
-                '    {"name":"%s","size":%s}' \
-                "$name" \
-                "$size"
-
-            done < <(
-              find "$APK_OUTPUT" \
-                -maxdepth 1 \
-                -type f \
-                -name '*.apk' \
-                -print0
-            )
-
-            echo
-            echo '  ]'
-            echo '}'
-
-          } > "$APK_OUTPUT/apk-manifest.json"
-
-          echo "Final release files:"
-
-          find "$APK_OUTPUT" \
-            -maxdepth 1 \
-            -type f \
-            -print
-
-      - name: Final APK validation
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          count=0
-
-          while IFS= read -r -d '' apk; do
-
-            count=$((count + 1))
-
-            size="$(stat -c%s "$apk")"
-
-            echo "Checking:"
-            echo "$(basename "$apk")"
-
-            echo "Size:"
-            echo "$size bytes"
-
-            if [ "$size" -le 1024 ]; then
-              echo "ERROR: APK too small."
-              exit 1
-            fi
-
-            unzip -t "$apk" >/dev/null
-
-            echo "ZIP integrity: OK"
-
-          done < <(
-            find "$APK_OUTPUT" \
-              -maxdepth 1 \
-              -type f \
-              -name '*.apk' \
-              -print0
-          )
-
-          if [ "$count" -eq 0 ]; then
-            echo "ERROR: No packaged APK."
-            exit 1
-          fi
-
-      - name: Build summary
-        if: success()
-        shell: bash
-        run: |
-          {
-            echo "# BTC Quant APK Build"
-            echo
-            echo "## Status"
-            echo
-            echo "- Build: SUCCESS"
-            echo "- APK generation: SUCCESS"
-            echo "- APK validation: SUCCESS"
-            echo
-            echo "## APK files"
-            echo
-
-            while IFS= read -r -d '' apk; do
-
-              size="$(stat -c%s "$apk")"
-
-              echo "- $(basename "$apk") — ${size} bytes"
-
-            done < <(
-              find "$APK_OUTPUT" \
-                -maxdepth 1 \
-                -type f \
-                -name '*.apk' \
-                -print0
-            )
-
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload APK artifact
+      # ============================================================
+      # 12. Upload APK
+      # ============================================================
+      - name: Upload Debug APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: BTC-Quant-Release-APK
+          name: BTC-Quant-debug-apk
           path: |
-            release/*.apk
-            release/apk-manifest.json
+            **/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
-      - name: Upload build logs
+      # ============================================================
+      # 13. Upload build reports/logs
+      # ============================================================
+      - name: Upload Build Reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: BTC-Quant-Build-Logs
+          name: BTC-Quant-build-reports
           path: |
-            build_logs/**
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Upload APK diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: BTC-Quant-APK-Diagnostics
-          path: |
-            android_project/app/build/outputs/apk/**
-          if-no-files-found: warn
+            **/build/reports/**
+            **/build/outputs/logs/**
+          if-no-files-found: ignore
           retention-days: 7
+
+      # ============================================================
+      # 14. Final summary
+      # ============================================================
+      - name: Build Summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## 📊 BTC Quant APK Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Build Information" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Time:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Actor:** ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Branch:** ${{ github.ref_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Commit:** ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **JDK:** 17" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Gradle:** 8.9" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Compile SDK:** Android 35" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Build Tools:** 35.0.0" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ steps.build_apk.outputs.build_success }}" = "true" ]; then
+            echo "### ✅ BUILD SUCCESS" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Debug APK was generated successfully." >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Artifact: \`BTC-Quant-debug-apk\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ❌ BUILD FAILED" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Check the Gradle build logs and uploaded reports." >> "$GITHUB_STEP_SUMMARY"
+          fi

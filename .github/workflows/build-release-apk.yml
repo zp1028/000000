@@ -528,53 +528,53 @@ jobs:
             echo "- Build: SUCCESS"
             echo "- APK generation: SUCCESS"
             echo "- APK validation: SUCCESS"
-回声
-Android_project/app/build/outputs/apk/**
-而IFS=read-r-d
+            echo
+            echo "## APK files"
+            echo
 
-回声姓名
+            while IFS= read -r -d '' apk; do
 
-大小="$(STAT-C%s"$apk")"
+              size="$(stat -c%s "$apk")"
 
-回声"-$(基本名称"$apk")-${大小}字节”
+              echo "- $(basename "$apk") — ${size} bytes"
 
-完成<<(
-查找"$APK_OUTPUT"\
--max深度1\
--type f\
--name'*.apk'\
--print0
+            done < <(
+              find "$APK_OUTPUT" \
+                -maxdepth 1 \
+                -type f \
+                -name '*.apk' \
+                -print0
             )
 
-}>>"$GITHUB_STEP_SUMMARY"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - 姓名: 上传安装包工件
-如果: 成功()
-uses: 操作/上载工件@v4
-和……一起:
-姓名: BTC-Quant-Release-APK
-路径: |
-if-no-file-found
-if-no-file-found
-if-no-file-found: 误差
-保留天数: 姓名名4
+      - name: Upload APK artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BTC-Quant-Release-APK
+          path: |
+            release/*.apk
+            release/apk-manifest.json
+          if-no-files-found: error
+          retention-days: 14
 
-姓名4姓名: 上载生成日志
-如果: 总是()
-uses: 操作/上载工件@v4
-和……一起:
-姓名: BTC-Quant-Build-Logs
-路径: |
-build_logs/**
-if-no-file-found: 警告
-保留天数: 姓名名4
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BTC-Quant-Build-Logs
+          path: |
+            build_logs/**
+          if-no-files-found: warn
+          retention-days: 14
 
-姓名4姓名: 上传安装包诊断
-如果: 总是()
-uses: 操作/上载工件@v4
-和……一起:
-姓名: BTC-Quant-APK-Diagnostics
-路径: |
-Android_project/app/build/outputs/apk/**
-if-no-file-found: 警告
-保留天数: 7
+      - name: Upload APK diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BTC-Quant-APK-Diagnostics
+          path: |
+            android_project/app/build/outputs/apk/**
+          if-no-files-found: warn
+          retention-days: 7

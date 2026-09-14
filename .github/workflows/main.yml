@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_zip:
-        description: "源码 ZIP 文件名（放在仓库根目录；留空则自动寻找）"
+        description: "源码 ZIP 文件名，放在仓库根目录；留空则自动寻找"
         required: false
         default: ""
 
@@ -22,7 +22,6 @@ permissions:
   contents: read
 
 jobs:
-
   build-release-apk:
 
     name: Build Release APK
@@ -36,17 +35,17 @@ jobs:
 
     steps:
 
-      # ============================================================
+      # ==========================================================
       # 1. Checkout
-      # ============================================================
+      # ==========================================================
 
       - name: "1️⃣ Checkout repository"
         uses: actions/checkout@v4
 
 
-      # ============================================================
-      # 2. 显示基础环境
-      # ============================================================
+      # ==========================================================
+      # 2. 显示环境
+      # ==========================================================
 
       - name: "2️⃣ Show build environment"
         shell: bash
@@ -70,29 +69,38 @@ jobs:
           java -version 2>&1 || true
 
           echo
-          echo "Working directory:"
+          echo "Workspace:"
           pwd
 
           echo
-          echo "Repository:"
+          echo "Repository files:"
           find . -maxdepth 3 -type f | sort | head -1000
 
 
-      # ============================================================
+      # ==========================================================
       # 3. JDK 17
-      # ============================================================
+      #
+      # 注意：
+      # 这里不能使用 cache: gradle
+      #
+      # 因为源码工程还在 ZIP 里面。
+      # setup-java 会立即寻找 Gradle 文件，
+      # 此时还没有解压，所以会导致：
+      #
+      # Error: No file ... matched to [**/*.gradle* ...]
+      #
+      # ==========================================================
 
       - name: "3️⃣ Setup JDK 17"
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
 
 
-      # ============================================================
-      # 4. 查找 ZIP
-      # ============================================================
+      # ==========================================================
+      # 4. 查找源码 ZIP
+      # ==========================================================
 
       - name: "4️⃣ Find source ZIP"
         shell: bash
@@ -107,8 +115,9 @@ jobs:
 
           ZIP=""
 
+
           # ----------------------------------------------------------
-          # 优先使用 workflow_dispatch 指定的 ZIP
+          # A. 用户指定 ZIP
           # ----------------------------------------------------------
 
           if [ -n "$INPUT_ZIP" ]; then
@@ -120,91 +129,84 @@ jobs:
               ZIP="./$INPUT_ZIP"
 
             else
+
               echo "::error::指定的 ZIP 不存在：$INPUT_ZIP"
 
               echo
-              echo "仓库中的 ZIP："
+              echo "当前仓库 ZIP："
 
               find . \
                 -maxdepth 3 \
                 -type f \
-                \( -iname "*.zip" \) \
+                -iname "*.zip" \
                 -print \
                 | sort
 
               exit 1
+
             fi
 
           fi
 
 
           # ----------------------------------------------------------
-          # 如果没有指定，则自动寻找
+          # B. 自动寻找 ZIP
           # ----------------------------------------------------------
 
           if [ -z "$ZIP" ]; then
 
-            ZIP_COUNT=$(find . \
-              -maxdepth 2 \
-              -type f \
-              -iname "*.zip" \
-              | wc -l)
+            mapfile -t ZIP_FILES < <(
+              find . \
+                -maxdepth 3 \
+                -type f \
+                -iname "*.zip" \
+                | sort
+            )
+
+            ZIP_COUNT="${#ZIP_FILES[@]}"
+
 
             if [ "$ZIP_COUNT" -eq 0 ]; then
 
-              echo "::error::仓库中没有找到 ZIP 源码包"
+              echo "::error::仓库中没有找到源码 ZIP"
 
               echo
               echo "当前仓库文件："
 
               find . \
-                -maxdepth 3 \
+                -maxdepth 4 \
                 -type f \
                 | sort \
-                | head -1000
+                | head -1500
 
               exit 1
 
-            elif [ "$ZIP_COUNT" -eq 1 ]; then
+            fi
 
-              ZIP=$(find . \
-                -maxdepth 2 \
-                -type f \
-                -iname "*.zip" \
-                | head -1)
+
+            if [ "$ZIP_COUNT" -eq 1 ]; then
+
+              ZIP="${ZIP_FILES[0]}"
 
             else
 
               echo "发现多个 ZIP："
 
-              find . \
-                -maxdepth 2 \
-                -type f \
-                -iname "*.zip" \
-                | sort
+              printf '%s\n' "${ZIP_FILES[@]}"
 
-              # 优先选择名称中包含 source / project / caifenxi 的 ZIP
 
-              ZIP=$(find . \
-                -maxdepth 2 \
-                -type f \
-                -iname "*.zip" \
+              # 优先选择源码工程相关 ZIP
+              ZIP=$(
+                printf '%s\n' "${ZIP_FILES[@]}" \
                 | grep -Ei \
-                  "(source|project|caifenxi|app|android)" \
+                  "(source|project|caifenxi|android|app|release|fixed|merged)" \
                 | head -1 \
-                || true)
+                || true
+              )
 
-              # 如果仍然没有，则使用第一个
 
               if [ -z "$ZIP" ]; then
-
-                ZIP=$(find . \
-                  -maxdepth 2 \
-                  -type f \
-                  -iname "*.zip" \
-                  | sort \
-                  | head -1)
-
+                ZIP="${ZIP_FILES[0]}"
               fi
 
             fi
@@ -212,9 +214,13 @@ jobs:
           fi
 
 
+          # ----------------------------------------------------------
+          # C. 最终检查
+          # ----------------------------------------------------------
+
           if [ -z "$ZIP" ] || [ ! -f "$ZIP" ]; then
 
-            echo "::error::最终无法确定源码 ZIP"
+            echo "::error::无法确定源码 ZIP"
 
             exit 1
 
@@ -229,12 +235,17 @@ jobs:
           echo "ZIP 大小："
           du -h "$ZIP"
 
+          echo
+          echo "ZIP SHA256："
+          sha256sum "$ZIP"
+
+
           echo "SOURCE_ZIP=$ZIP" >> "$GITHUB_ENV"
 
 
-      # ============================================================
+      # ==========================================================
       # 5. ZIP 完整性检查
-      # ============================================================
+      # ==========================================================
 
       - name: "5️⃣ Validate ZIP"
         shell: bash
@@ -249,19 +260,19 @@ jobs:
 
           if ! unzip -t "$SOURCE_ZIP"; then
 
-            echo "::error::ZIP 文件损坏或无法读取"
+            echo "::error::ZIP 文件损坏或无法正常读取"
 
             exit 1
 
           fi
 
           echo
-          echo "ZIP 完整性检查通过"
+          echo "✅ ZIP 完整性检查通过"
 
 
-      # ============================================================
-      # 6. 解压
-      # ============================================================
+      # ==========================================================
+      # 6. 解压源码
+      # ==========================================================
 
       - name: "6️⃣ Extract source ZIP"
         shell: bash
@@ -275,18 +286,31 @@ jobs:
           mkdir -p android_project
 
           echo "=================================================="
-          echo "EXTRACT SOURCE"
+          echo "EXTRACT SOURCE ZIP"
           echo "=================================================="
 
           echo "解压：$SOURCE_ZIP"
 
-          unzip -q "$SOURCE_ZIP" -d build_source
+          if ! unzip -q "$SOURCE_ZIP" -d build_source; then
+
+            echo "::error::ZIP 解压失败"
+
+            echo
+            echo "尝试完整解压测试："
+
+            unzip -t "$SOURCE_ZIP" || true
+
+            exit 1
+
+          fi
+
 
           echo
-          echo "解压完成"
+          echo "✅ ZIP 解压完成"
+
 
           echo
-          echo "解压后目录："
+          echo "解压后的目录："
 
           find build_source \
             -maxdepth 8 \
@@ -295,11 +319,11 @@ jobs:
             | head -3000
 
 
-      # ============================================================
-      # 7. 自动扫描 Android 工程
-      # ============================================================
+      # ==========================================================
+      # 7. 扫描 Android 工程候选
+      # ==========================================================
 
-      - name: "7️⃣ Scan Android projects"
+      - name: "7️⃣ Scan Android project candidates"
         shell: bash
         run: |
           set -e
@@ -307,6 +331,7 @@ jobs:
           echo "=================================================="
           echo "SCAN ANDROID PROJECT CANDIDATES"
           echo "=================================================="
+
 
           CANDIDATES="$GITHUB_WORKSPACE/project_candidates.txt"
 
@@ -316,7 +341,7 @@ jobs:
 
 
           # ----------------------------------------------------------
-          # 找 settings.gradle
+          # settings.gradle
           # ----------------------------------------------------------
 
           find build_source \
@@ -327,30 +352,32 @@ jobs:
               -name "settings.gradle.kts" \
             \) \
             -print \
-            | while read -r FILE; do
+            | while IFS= read -r FILE; do
 
-                dirname "$FILE" >> "$CANDIDATES"
+                dirname "$FILE"
 
-              done
+              done \
+            >> "$CANDIDATES"
 
 
           # ----------------------------------------------------------
-          # 找 gradlew
+          # gradlew
           # ----------------------------------------------------------
 
           find build_source \
             -type f \
             -name "gradlew" \
             -print \
-            | while read -r FILE; do
+            | while IFS= read -r FILE; do
 
-                dirname "$FILE" >> "$CANDIDATES"
+                dirname "$FILE"
 
-              done
+              done \
+            >> "$CANDIDATES"
 
 
           # ----------------------------------------------------------
-          # 找 build.gradle
+          # build.gradle
           # ----------------------------------------------------------
 
           find build_source \
@@ -361,11 +388,33 @@ jobs:
               -name "build.gradle.kts" \
             \) \
             -print \
-            | while read -r FILE; do
+            | while IFS= read -r FILE; do
 
-                dirname "$FILE" >> "$CANDIDATES"
+                dirname "$FILE"
 
-              done
+              done \
+            >> "$CANDIDATES"
+
+
+          # ----------------------------------------------------------
+          # AndroidManifest
+          # ----------------------------------------------------------
+
+          find build_source \
+            -type f \
+            -name "AndroidManifest.xml" \
+            -print \
+            | while IFS= read -r FILE; do
+
+                DIR=$(dirname "$FILE")
+
+                # 如果是 app/src/main/AndroidManifest.xml
+                if [[ "$DIR" == */src/main ]]; then
+                  dirname "$(dirname "$DIR")"
+                fi
+
+              done \
+            >> "$CANDIDATES"
 
 
           # ----------------------------------------------------------
@@ -377,14 +426,14 @@ jobs:
 
 
           echo
-          echo "候选工程："
+          echo "候选工程目录："
 
           cat "$CANDIDATES"
 
 
           if [ ! -s "$CANDIDATES" ]; then
 
-            echo "::error::没有找到任何 Android/Gradle 工程"
+            echo "::error::没有找到 Android/Gradle 工程"
 
             echo
             echo "解压后的文件："
@@ -400,9 +449,9 @@ jobs:
           fi
 
 
-      # ============================================================
+      # ==========================================================
       # 8. 工程候选评分
-      # ============================================================
+      # ==========================================================
 
       - name: "8️⃣ Score project candidates"
         shell: bash
@@ -410,7 +459,7 @@ jobs:
           set -e
 
           echo "=================================================="
-          echo "SCORE ANDROID PROJECT CANDIDATES"
+          echo "SCORE ANDROID PROJECTS"
           echo "=================================================="
 
 
@@ -430,13 +479,6 @@ jobs:
 
             SCORE=0
 
-            echo
-            echo "------------------------------------------"
-            echo "Candidate:"
-            echo "$ROOT"
-
-            echo "Candidate: $ROOT" >> "$REPORT"
-
 
             # --------------------------------------------------------
             # settings.gradle
@@ -452,22 +494,12 @@ jobs:
 
 
             # --------------------------------------------------------
-            # gradlew
+            # Gradle Wrapper
             # --------------------------------------------------------
 
             if [ -f "$ROOT/gradlew" ]; then
               SCORE=$((SCORE + 30))
             fi
-
-
-            # --------------------------------------------------------
-            # Gradle Wrapper
-            # --------------------------------------------------------
-
-            if [ -d "$ROOT/gradle/wrapper" ]; then
-              SCORE=$((SCORE + 20))
-            fi
-
 
             if [ -f "$ROOT/gradle/wrapper/gradle-wrapper.properties" ]; then
               SCORE=$((SCORE + 20))
@@ -475,7 +507,7 @@ jobs:
 
 
             # --------------------------------------------------------
-            # root build.gradle
+            # Root build.gradle
             # --------------------------------------------------------
 
             if [ -f "$ROOT/build.gradle" ]; then
@@ -495,7 +527,6 @@ jobs:
               SCORE=$((SCORE + 30))
             fi
 
-
             if [ -f "$ROOT/app/build.gradle" ]; then
               SCORE=$((SCORE + 30))
             fi
@@ -506,11 +537,20 @@ jobs:
 
 
             # --------------------------------------------------------
-            # AndroidManifest
+            # Android Manifest
             # --------------------------------------------------------
 
             if [ -f "$ROOT/app/src/main/AndroidManifest.xml" ]; then
               SCORE=$((SCORE + 30))
+            fi
+
+
+            # --------------------------------------------------------
+            # Android source
+            # --------------------------------------------------------
+
+            if [ -d "$ROOT/app/src/main" ]; then
+              SCORE=$((SCORE + 20))
             fi
 
 
@@ -520,15 +560,6 @@ jobs:
 
             if [ -f "$ROOT/gradle.properties" ]; then
               SCORE=$((SCORE + 10))
-            fi
-
-
-            # --------------------------------------------------------
-            # src/main
-            # --------------------------------------------------------
-
-            if [ -d "$ROOT/app/src/main" ]; then
-              SCORE=$((SCORE + 20))
             fi
 
 
@@ -562,15 +593,28 @@ jobs:
             fi
 
 
-            echo "Score: $SCORE"
+            # --------------------------------------------------------
+            # 输出
+            # --------------------------------------------------------
 
-            echo "Score: $SCORE" >> "$REPORT"
+            echo
+            echo "------------------------------------------"
+            echo "Candidate:"
+            echo "$ROOT"
+            echo "Score:"
+            echo "$SCORE"
 
-            echo "" >> "$REPORT"
+
+            {
+              echo "Candidate: $ROOT"
+              echo "Score: $SCORE"
+              echo
+
+            } >> "$REPORT"
 
 
             # --------------------------------------------------------
-            # 更新最高分
+            # 选择最高分
             # --------------------------------------------------------
 
             if [ "$SCORE" -gt "$BEST_SCORE" ]; then
@@ -580,19 +624,20 @@ jobs:
 
             fi
 
-          done < project_candidates.txt
+          done < "$CANDIDATES"
 
 
           echo
           echo "=================================================="
-          echo "BEST PROJECT"
+          echo "SELECTED PROJECT"
           echo "=================================================="
 
-          echo "ROOT:"
+
+          echo "Root:"
           echo "$BEST_ROOT"
 
           echo
-          echo "SCORE:"
+          echo "Score:"
           echo "$BEST_SCORE"
 
 
@@ -607,9 +652,7 @@ jobs:
 
           if [ "$BEST_SCORE" -lt 70 ]; then
 
-            echo "::warning::检测到的工程完整度较低"
-
-            echo "可能不是标准 Android 工程"
+            echo "::warning::工程评分低于 70，可能不是完整 Android 工程"
 
           fi
 
@@ -618,58 +661,57 @@ jobs:
           echo "DETECTED_SCORE=$BEST_SCORE" >> "$GITHUB_ENV"
 
 
-      # ============================================================
+      # ==========================================================
       # 9. 自动整理工程根目录
-      # ============================================================
+      # ==========================================================
 
-      - name: "9️⃣ Normalize project root"
+      - name: "9️⃣ Normalize Android project root"
         shell: bash
         run: |
           set -e
 
           echo "=================================================="
-          echo "NORMALIZE PROJECT ROOT"
+          echo "NORMALIZE ANDROID PROJECT"
           echo "=================================================="
 
+
           rm -rf android_project
+
           mkdir -p android_project
 
 
           ROOT="$DETECTED_ROOT"
 
+          REAL_ROOT="$ROOT"
 
-          echo "检测出的根目录："
+
+          echo "检测根目录："
           echo "$ROOT"
 
 
           # ----------------------------------------------------------
-          # 检查是否还有更深层真正工程
+          # 检查更深层工程
           # ----------------------------------------------------------
 
-          REAL_ROOT="$ROOT"
-
-
-          INNER_SETTINGS=$(find "$ROOT" \
-            -mindepth 1 \
-            -type f \
-            \( \
-              -name "settings.gradle" \
-              -o \
-              -name "settings.gradle.kts" \
-            \) \
-            | head -1 \
-            || true)
+          INNER_SETTINGS=$(
+            find "$ROOT" \
+              -mindepth 1 \
+              -type f \
+              \( \
+                -name "settings.gradle" \
+                -o \
+                -name "settings.gradle.kts" \
+              \) \
+              | head -1 \
+              || true
+          )
 
 
           if [ -n "$INNER_SETTINGS" ]; then
 
             INNER_ROOT=$(dirname "$INNER_SETTINGS")
 
-            echo
-            echo "发现更深层 settings.gradle："
-            echo "$INNER_ROOT"
 
-            # 只有更深层目录同时具备工程特征才切换
             if [ -f "$INNER_ROOT/gradlew" ] || \
                [ -f "$INNER_ROOT/build.gradle" ] || \
                [ -f "$INNER_ROOT/build.gradle.kts" ]; then
@@ -694,7 +736,7 @@ jobs:
 
 
           # ----------------------------------------------------------
-          # 删除明显的构建缓存
+          # 删除旧构建缓存
           # ----------------------------------------------------------
 
           rm -rf android_project/.gradle
@@ -711,14 +753,10 @@ jobs:
             chmod +x android_project/gradlew
 
             echo
-            echo "已修复 gradlew 执行权限"
+            echo "✅ gradlew 执行权限已修复"
 
           fi
 
-
-          # ----------------------------------------------------------
-          # 保存最终根目录
-          # ----------------------------------------------------------
 
           echo "PROJECT_ROOT=$GITHUB_WORKSPACE/android_project" \
             >> "$GITHUB_ENV"
@@ -726,20 +764,20 @@ jobs:
 
           echo
           echo "=================================================="
-          echo "NORMALIZED PROJECT"
+          echo "NORMALIZED PROJECT STRUCTURE"
           echo "=================================================="
 
 
           find android_project \
-            -maxdepth 4 \
+            -maxdepth 5 \
             -print \
             | sort \
-            | head -3000
+            | head -4000
 
 
-      # ============================================================
-      # 10. 最终工程强校验
-      # ============================================================
+      # ==========================================================
+      # 10. 最终工程验证
+      # ==========================================================
 
       - name: "🔟 Validate normalized Android project"
         shell: bash
@@ -786,7 +824,7 @@ jobs:
 
 
           # ----------------------------------------------------------
-          # build.gradle
+          # root build
           # ----------------------------------------------------------
 
           if [ -f "build.gradle" ] || \
@@ -796,7 +834,7 @@ jobs:
 
           else
 
-            echo "::warning::⚠️ 根目录没有 build.gradle"
+            echo "::warning::⚠️ Root build.gradle 不存在"
 
           fi
 
@@ -811,13 +849,13 @@ jobs:
 
           else
 
-            echo "::warning::⚠️ 没有发现 app 目录"
+            echo "::warning::⚠️ 没有发现 app module"
 
           fi
 
 
           # ----------------------------------------------------------
-          # Manifest
+          # manifest
           # ----------------------------------------------------------
 
           if [ -f "app/src/main/AndroidManifest.xml" ]; then
@@ -826,13 +864,13 @@ jobs:
 
           else
 
-            echo "::warning::⚠️ 没有发现 app/src/main/AndroidManifest.xml"
+            echo "::warning::⚠️ 没有发现 AndroidManifest.xml"
 
           fi
 
 
           # ----------------------------------------------------------
-          # Gradle Wrapper
+          # gradlew
           # ----------------------------------------------------------
 
           if [ -f "gradlew" ]; then
@@ -864,11 +902,57 @@ jobs:
           fi
 
 
-      # ============================================================
-      # 11. 分析 Gradle 配置
-      # ============================================================
+      # ==========================================================
+      # 11. 配置 Gradle Cache
+      #
+      # 注意：
+      # 现在才启用缓存。
+      #
+      # 因为现在 android_project 已经存在 Gradle 文件。
+      # ==========================================================
 
-      - name: "1️⃣1️⃣ Analyze Gradle configuration"
+      - name: "1️⃣1️⃣ Setup Gradle cache"
+        shell: bash
+        run: |
+          set -e
+
+          echo "=================================================="
+          echo "SETUP GRADLE CACHE"
+          echo "=================================================="
+
+
+          mkdir -p "$GRADLE_USER_HOME"
+
+
+          echo "Gradle User Home:"
+          echo "$GRADLE_USER_HOME"
+
+
+          echo
+          echo "Gradle files:"
+
+
+          find "$PROJECT_ROOT" \
+            -type f \
+            \( \
+              -name "settings.gradle" \
+              -o \
+              -name "settings.gradle.kts" \
+              -o \
+              -name "build.gradle" \
+              -o \
+              -name "build.gradle.kts" \
+              -o \
+              -name "gradle-wrapper.properties" \
+            \) \
+            | sort
+
+
+      # ==========================================================
+      # 12. Gradle 配置分析
+      # ==========================================================
+
+      - name: "1️⃣2️⃣ Analyze Gradle configuration"
         shell: bash
         run: |
           set +e
@@ -896,34 +980,35 @@ jobs:
 
 
           echo
+          echo "Gradle Wrapper:"
+          cat gradle/wrapper/gradle-wrapper.properties 2>/dev/null || true
+
+
+          echo
           echo "Gradle properties:"
           cat gradle.properties 2>/dev/null || true
 
 
           echo
-          echo "Gradle wrapper properties:"
-          cat gradle/wrapper/gradle-wrapper.properties 2>/dev/null || true
-
-
-          echo
           echo "Settings:"
           if [ -f settings.gradle.kts ]; then
-            sed -n '1,250p' settings.gradle.kts
+            sed -n '1,300p' settings.gradle.kts
           elif [ -f settings.gradle ]; then
-            sed -n '1,250p' settings.gradle
+            sed -n '1,300p' settings.gradle
           fi
 
 
-      # ============================================================
-      # 12. Clean
-      # ============================================================
+      # ==========================================================
+      # 13. Gradle Clean
+      # ==========================================================
 
-      - name: "1️⃣2️⃣ Clean project"
+      - name: "1️⃣3️⃣ Gradle clean"
         shell: bash
         run: |
           set -o pipefail
 
           cd "$PROJECT_ROOT"
+
 
           echo "=================================================="
           echo "GRADLE CLEAN"
@@ -935,23 +1020,25 @@ jobs:
             ./gradlew clean \
               --stacktrace \
               --no-daemon \
-              2>&1 | tee "$GITHUB_WORKSPACE/gradle-clean.log"
+              2>&1 \
+              | tee "$GITHUB_WORKSPACE/gradle-clean.log"
 
           else
 
             gradle clean \
               --stacktrace \
               --no-daemon \
-              2>&1 | tee "$GITHUB_WORKSPACE/gradle-clean.log"
+              2>&1 \
+              | tee "$GITHUB_WORKSPACE/gradle-clean.log"
 
           fi
 
 
-      # ============================================================
-      # 13. 正式 Release 构建
-      # ============================================================
+      # ==========================================================
+      # 14. Release 构建
+      # ==========================================================
 
-      - name: "1️⃣3️⃣ Build Release APK"
+      - name: "1️⃣4️⃣ Build Release APK"
         id: release_build
         shell: bash
         run: |
@@ -969,10 +1056,11 @@ jobs:
 
 
           echo "=================================================="
-          echo "RELEASE BUILD"
+          echo "BUILD RELEASE APK"
           echo "=================================================="
 
 
+          echo
           echo "Project:"
           pwd
 
@@ -988,7 +1076,16 @@ jobs:
 
 
           echo
-          echo "Build started..."
+          echo "Gradle:"
+          if [ -f "./gradlew" ]; then
+            ./gradlew --version
+          else
+            gradle --version
+          fi
+
+
+          echo
+          echo "开始正式构建..."
 
 
           if [ -f "./gradlew" ]; then
@@ -1012,15 +1109,18 @@ jobs:
           fi
 
 
-      # ============================================================
-      # 14. 自动分析失败原因
-      # ============================================================
+      # ==========================================================
+      # 15. 构建失败自动分析
+      # ==========================================================
 
-      - name: "1️⃣4️⃣ Analyze build failure"
+      - name: "1️⃣5️⃣ Analyze build failure"
         if: failure()
         shell: bash
         run: |
           set +e
+
+
+          LOG="$GITHUB_WORKSPACE/gradle-build.log"
 
 
           echo "=================================================="
@@ -1028,17 +1128,18 @@ jobs:
           echo "=================================================="
 
 
-          LOG="$GITHUB_WORKSPACE/gradle-build.log"
-
-
           if [ ! -f "$LOG" ]; then
 
-            echo "::error::没有找到 Gradle 构建日志"
+            echo "::error::没有找到 gradle-build.log"
 
             exit 0
 
           fi
 
+
+          # ========================================================
+          # 1. 总体 FAILURE
+          # ========================================================
 
           echo
           echo "=================================================="
@@ -1049,221 +1150,110 @@ jobs:
           grep -nE \
             "FAILURE:|What went wrong:|Execution failed|BUILD FAILED" \
             "$LOG" \
-            | tail -50 \
+            | tail -80 \
             || true
 
 
+          # ========================================================
+          # 2. Kotlin
+          # ========================================================
+
           echo
           echo "=================================================="
-          echo "2. KOTLIN / JAVA ERROR"
+          echo "2. KOTLIN ERRORS"
           echo "=================================================="
 
 
           grep -nE \
-            "e: .*\.kt:|error: .*\.java:|Unresolved reference|Type mismatch|Unresolved" \
+            "e: .*\.kt:|Unresolved reference|Type mismatch|Expecting|Cannot infer|Unresolved" \
             "$LOG" \
-            | tail -100 \
+            | tail -150 \
             || true
 
 
+          # ========================================================
+          # 3. Java
+          # ========================================================
+
           echo
           echo "=================================================="
-          echo "3. GRADLE DEPENDENCY ERROR"
+          echo "3. JAVA ERRORS"
           echo "=================================================="
 
 
           grep -nE \
-            "Could not resolve|Could not find|Could not GET|Could not HEAD|Failed to resolve" \
+            "error: .*\.java:|cannot find symbol|package .* does not exist" \
             "$LOG" \
-            | tail -100 \
+            | tail -150 \
             || true
 
 
+          # ========================================================
+          # 4. Gradle dependencies
+          # ========================================================
+
           echo
           echo "=================================================="
-          echo "4. AGP / GRADLE PLUGIN ERROR"
+          echo "4. GRADLE DEPENDENCY ERRORS"
           echo "=================================================="
 
 
           grep -niE \
-            "Plugin.*was not found|plugin.*not found|Android Gradle Plugin|AGP|Minimum supported Gradle|requires Gradle" \
+            "Could not resolve|Could not find|Could not GET|Could not HEAD|Failed to resolve|Connection timed out" \
             "$LOG" \
-            | tail -100 \
+            | tail -150 \
             || true
 
 
+          # ========================================================
+          # 5. AGP / Gradle
+          # ========================================================
+
           echo
           echo "=================================================="
-          echo "5. MANIFEST ERROR"
+          echo "5. AGP / GRADLE VERSION ERRORS"
+          echo "=================================================="
+
+
+          grep -niE \
+            "Minimum supported Gradle|requires Gradle|Plugin.*was not found|plugin.*not found|Android Gradle Plugin|AGP" \
+            "$LOG" \
+            | tail -150 \
+            || true
+
+
+          # ========================================================
+          # 6. Manifest
+          # ========================================================
+
+          echo
+          echo "=================================================="
+          echo "6. MANIFEST ERRORS"
           echo "=================================================="
 
 
           grep -niE \
             "Manifest merger failed|AndroidManifest|manifest merger" \
             "$LOG" \
-            | tail -100 \
+            | tail -150 \
             || true
 
 
+          # ========================================================
+          # 7. AAPT / Resources
+          # ========================================================
+
           echo
           echo "=================================================="
-          echo "6. RESOURCE / AAPT ERROR"
+          echo "7. AAPT / RESOURCE ERRORS"
           echo "=================================================="
 
 
           grep -niE \
-            "AAPT|resource .* not found|error: resource|XML" \
-            "$LOG" \
-            | tail -100 \
-            || true
-
-
-          echo
-          echo "=================================================="
-          echo "7. D8 / R8 ERROR"
-          echo "=================================================="
-
-
-          grep -niE \
-            "D8|R8|DexArchiveMergerException|Duplicate class|dex" \
-            "$LOG" \
-            | tail -100 \
-            || true
-
-
-          echo
-          echo "=================================================="
-          echo "8. MEMORY ERROR"
-          echo "=================================================="
-
-
-          grep -niE \
-            "OutOfMemory|Java heap space|GC overhead|Killed|OOM" \
-            "$LOG" \
-            | tail -100 \
-            || true
-
-
-          echo
-          echo "=================================================="
-          echo "9. DUPLICATE CLASS"
-          echo "=================================================="
-
-
-          grep -niE \
-            "Duplicate class" \
-            "$LOG" \
-            | tail -100 \
-            || true
-
-
-          echo
-          echo "=================================================="
-          echo "10. CIRCULAR DEPENDENCY"
-          echo "=================================================="
-
-
-          grep -niE \
-            "circular dependency|Circular dependency" \
-            "$LOG" \
-            | tail -100 \
-            || true
-
-
-          echo
-          echo "=================================================="
-          echo "11. STACKTRACE"
-          echo "=================================================="
-
-
-          grep -nE \
-            "Caused by:|Exception:|Exception in thread" \
+            "AAPT|resource .* not found|error: resource|XML.*error" \
             "$LOG" \
             | tail -150 \
             || true
 
 
-          echo
-          echo "=================================================="
-          echo "12. LAST 300 LOG LINES"
-          echo "=================================================="
-
-
-          tail -300 "$LOG"
-
-
-          # ========================================================
-          # 自动分类
-          # ========================================================
-
-          echo
-          echo "=================================================="
-          echo "AUTOMATIC ERROR CLASSIFICATION"
-          echo "=================================================="
-
-
-          if grep -qi "Unresolved reference" "$LOG"; then
-
-            echo "❌ 类型：Kotlin Unresolved Reference"
-            echo "原因方向：类、函数、变量、import、模块依赖"
-
-          fi
-
-
-          if grep -qE "e: .*\.kt:" "$LOG"; then
-
-            echo "❌ 类型：Kotlin 编译错误"
-
-          fi
-
-
-          if grep -qE "error: .*\.java:" "$LOG"; then
-
-            echo "❌ 类型：Java 编译错误"
-
-          fi
-
-
-          if grep -qi "Could not resolve" "$LOG"; then
-
-            echo "❌ 类型：Gradle 依赖解析失败"
-
-          fi
-
-
-          if grep -qi "Duplicate class" "$LOG"; then
-
-            echo "❌ 类型：Duplicate Class / 依赖冲突"
-
-          fi
-
-
-          if grep -qi "Manifest merger failed" "$LOG"; then
-
-            echo "❌ 类型：AndroidManifest 合并失败"
-
-          fi
-
-
-          if grep -qi "AAPT" "$LOG"; then
-
-            echo "❌ 类型：Android Resource / AAPT 错误"
-
-          fi
-
-
-          if grep -qiE "D8.*failed|DexArchiveMergerException" "$LOG"; then
-
-            echo "❌ 类型：D8 / Dex 编译失败"
-
-          fi
-
-
-          if grep -qiE "R8.*failed|minifyReleaseWithR8" "$LOG"; then
-
-            echo "❌ 类型：R8 / Release 混淆失败"
-
-          fi
-
-
-          if grep -qiE "OutOfMemory|Java heap space|GC overhead|OOM"
+          # ===================================================

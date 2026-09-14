@@ -78,7 +78,7 @@ jobs:
 
 
       # ============================================================
-      # 3. JDK
+      # 3. JDK 17
       # ============================================================
 
       - name: "3️⃣ Setup JDK 17"
@@ -287,7 +287,10 @@ jobs:
           touch "$CANDIDATES"
 
 
-          # settings.gradle
+          # --------------------------------------------------------
+          # settings.gradle / settings.gradle.kts
+          # --------------------------------------------------------
+
           find "$GITHUB_WORKSPACE/build_source" \
             -type f \
             \( \
@@ -301,7 +304,10 @@ jobs:
               done >> "$CANDIDATES"
 
 
+          # --------------------------------------------------------
           # gradlew
+          # --------------------------------------------------------
+
           find "$GITHUB_WORKSPACE/build_source" \
             -type f \
             -name "gradlew" \
@@ -311,7 +317,10 @@ jobs:
               done >> "$CANDIDATES"
 
 
+          # --------------------------------------------------------
           # build.gradle
+          # --------------------------------------------------------
+
           find "$GITHUB_WORKSPACE/build_source" \
             -type f \
             \( \
@@ -325,7 +334,10 @@ jobs:
               done >> "$CANDIDATES"
 
 
+          # --------------------------------------------------------
           # AndroidManifest
+          # --------------------------------------------------------
+
           find "$GITHUB_WORKSPACE/build_source" \
             -type f \
             -name "AndroidManifest.xml" \
@@ -374,8 +386,6 @@ jobs:
           fi
 
 
-          # 关键：
-          # 保存到后续 GitHub Actions Step
           echo "CANDIDATES=$CANDIDATES" >> "$GITHUB_ENV"
 
           echo
@@ -832,10 +842,6 @@ jobs:
           fi
 
 
-          # --------------------------------------------------------
-          # Default Gradle version
-          # --------------------------------------------------------
-
           if [ -z "$GRADLE_VERSION" ]; then
 
             GRADLE_VERSION="8.9"
@@ -861,7 +867,6 @@ jobs:
           # --------------------------------------------------------
 
           WRAPPER_JAR="gradle/wrapper/gradle-wrapper.jar"
-
 
           WRAPPER_OK="false"
 
@@ -920,20 +925,15 @@ jobs:
             echo "$GRADLE_VERSION"
 
 
-            echo
-            echo "尝试使用系统 Gradle 生成 Wrapper..."
-
-
-            # Install the required Gradle distribution directly.
             GRADLE_INSTALL_DIR="$RUNNER_TEMP/gradle-$GRADLE_VERSION"
+
+            GRADLE_ZIP="$RUNNER_TEMP/gradle-$GRADLE_VERSION-bin.zip"
 
 
             if [ ! -x "$GRADLE_INSTALL_DIR/bin/gradle" ]; then
 
+              echo
               echo "下载 Gradle $GRADLE_VERSION"
-
-
-              GRADLE_ZIP="$RUNNER_TEMP/gradle-$GRADLE_VERSION-bin.zip"
 
 
               curl \
@@ -947,8 +947,7 @@ jobs:
                 "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
 
 
-              rm -rf "$GRADLE_INSTALL_DIR"
-
+              rm -rf "$RUNNER_TEMP/gradle-extract"
 
               mkdir -p "$RUNNER_TEMP/gradle-extract"
 
@@ -956,6 +955,9 @@ jobs:
               unzip -q \
                 "$GRADLE_ZIP" \
                 -d "$RUNNER_TEMP/gradle-extract"
+
+
+              rm -rf "$GRADLE_INSTALL_DIR"
 
 
               mv \
@@ -1334,12 +1336,4 @@ jobs:
           echo "=================================================="
 
           grep -niE \
-            "Could not resolve|Could not find|Could not GET|Could not HEAD|Failed to resolve|Connection timed out|Connection reset" \
-            "$LOG" \
-            | tail -250 \
-            || true
-
-
-          echo
-          echo "=================================================="
-          
+       

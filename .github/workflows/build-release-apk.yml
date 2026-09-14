@@ -80,7 +80,7 @@ jobs:
             -maxdepth 6 \
             -type f \
             | sort \
-            | head -5000
+            | head -4000
 
 
       # ============================================================
@@ -118,11 +118,9 @@ jobs:
           if [ -n "$INPUT_ZIP" ]; then
 
             if [ -f "$INPUT_ZIP" ]; then
-
               ZIP="$INPUT_ZIP"
 
             elif [ -f "./$INPUT_ZIP" ]; then
-
               ZIP="./$INPUT_ZIP"
 
             else
@@ -147,7 +145,7 @@ jobs:
 
 
           # --------------------------------------------------------
-          # Auto find ZIP
+          # Automatic ZIP discovery
           # --------------------------------------------------------
 
           if [ -z "$ZIP" ]; then
@@ -168,6 +166,9 @@ jobs:
 
               echo "::error::仓库中没有找到源码 ZIP"
 
+              echo
+              echo "仓库文件："
+
               find . \
                 -maxdepth 10 \
                 -type f \
@@ -181,7 +182,7 @@ jobs:
 
 
             echo
-            echo "发现 $ZIP_COUNT 个 ZIP："
+            echo "发现 ZIP 数量：$ZIP_COUNT"
 
             printf '%s\n' "${ZIP_FILES[@]}"
 
@@ -192,29 +193,31 @@ jobs:
 
             else
 
-              ZIP=$(
-                printf '%s\n' "${ZIP_FILES[@]}" \
-                | grep -Ei \
-                  "(source|project|caifenxi|btc|quant|android|app|release|fixed|merged|v10|v11|production)" \
-                | head -1 \
-                || true
-              )
+              ZIP=""
+
+              for CANDIDATE in "${ZIP_FILES[@]}"; do
+
+                BASENAME="$(basename "$CANDIDATE")"
+
+                if echo "$BASENAME" | grep -Eiq \
+                  "(btc|quant|android|source|project|caifenxi|release|fixed|merged|v10|v11)"; then
+
+                  ZIP="$CANDIDATE"
+                  break
+
+                fi
+
+              done
 
 
               if [ -z "$ZIP" ]; then
-
                 ZIP="${ZIP_FILES[0]}"
-
               fi
 
             fi
 
           fi
 
-
-          # --------------------------------------------------------
-          # Validate selected ZIP
-          # --------------------------------------------------------
 
           if [ -z "$ZIP" ]; then
 
@@ -236,7 +239,6 @@ jobs:
 
           echo
           echo "最终源码 ZIP："
-
           echo "$ZIP"
 
 
@@ -295,7 +297,9 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/build_source"
           mkdir -p "$GITHUB_WORKSPACE/android_project"
 
+
           echo "解压：$SOURCE_ZIP"
+
 
           unzip -q \
             "$SOURCE_ZIP" \
@@ -496,6 +500,7 @@ jobs:
 
           REPORT="$GITHUB_WORKSPACE/project-detection-report.txt"
 
+
           rm -f "$REPORT"
 
           touch "$REPORT"
@@ -505,13 +510,12 @@ jobs:
 
             [ -z "$ROOT" ] && continue
 
+
             ROOT="${ROOT%$'\r'}"
 
 
             if [ ! -d "$ROOT" ]; then
-
               continue
-
             fi
 
 
@@ -706,9 +710,7 @@ jobs:
           REAL_ROOT="$ROOT"
 
 
-          echo
           echo "检测根目录："
-
           echo "$ROOT"
 
 
@@ -821,18 +823,16 @@ jobs:
 
           echo
           echo "Project root:"
-
           pwd
 
 
           echo
           echo "Root files:"
-
           ls -la
 
 
           # --------------------------------------------------------
-          # Android project
+          # Validate Android project
           # --------------------------------------------------------
 
           if [ -f "settings.gradle" ]; then
@@ -884,10 +884,6 @@ jobs:
 
           fi
 
-
-          # --------------------------------------------------------
-          # Wrapper directory
-          # --------------------------------------------------------
 
           mkdir -p gradle/wrapper
 
@@ -951,7 +947,7 @@ jobs:
 
 
           # --------------------------------------------------------
-          # Check wrapper JAR
+          # Validate Wrapper JAR
           # --------------------------------------------------------
 
           WRAPPER_JAR="gradle/wrapper/gradle-wrapper.jar"
@@ -1171,7 +1167,6 @@ jobs:
 
           echo
           echo "GRADLE_USER_HOME:"
-
           echo "$GRADLE_USER_HOME"
 
 
@@ -1197,7 +1192,7 @@ jobs:
 
 
       # ============================================================
-      # 12. ANALYZE CONFIG
+      # 12. ANALYZE CONFIGURATION
       # ============================================================
 
       - name: "1️⃣2️⃣ Analyze Gradle configuration"
@@ -1237,7 +1232,8 @@ jobs:
           echo
           echo "Gradle properties:"
 
-          cat gradle.properties \
+          cat \
+            gradle.properties \
             2>/dev/null \
             || true
 
@@ -1271,7 +1267,7 @@ jobs:
 
 
       # ============================================================
-      # 13. GRADLE CLEAN
+      # 13. CLEAN
       # ============================================================
 
       - name: "1️⃣3️⃣ Gradle clean"
@@ -1294,10 +1290,6 @@ jobs:
             | tee "$GITHUB_WORKSPACE/gradle-clean.log"
 
 
-          echo
-          echo "✅ Gradle clean 完成"
-
-
       # ============================================================
       # 14. BUILD RELEASE APK
       # ============================================================
@@ -1315,9 +1307,7 @@ jobs:
 
 
           if [ -z "$TASK" ]; then
-
             TASK="assembleRelease"
-
           fi
 
 
@@ -1328,13 +1318,11 @@ jobs:
 
           echo
           echo "Project:"
-
           pwd
 
 
           echo
           echo "Gradle task:"
-
           echo "$TASK"
 
 
@@ -1370,15 +1358,11 @@ jobs:
           echo "=========================================="
 
 
-          echo
-          echo "构建任务完成"
-
-
       # ============================================================
-      # 15. LOCATE APK
+      # 15. LOCATE AND PREPARE APK
       # ============================================================
 
-      - name: "1️⃣5️⃣ Locate generated APK"
+      - name: "1️⃣5️⃣ Locate and prepare APK"
         if: success()
         shell: bash
         run: |
@@ -1402,15 +1386,19 @@ jobs:
 
 
           echo
-          echo "所有 APK："
+          echo "扫描 APK..."
 
+
+          # --------------------------------------------------------
+          # Locate all APK files
+          # --------------------------------------------------------
 
           mapfile -t APK_FILES < <(
-            find "$PROJECT_ROOT" \
+            find "$PROJECT_ROOT/app/build/outputs/apk" \
               -type f \
               -iname "*.apk" \
-              -not -path "*/.gradle/*" \
-              -not -path "*/build/intermediates/*" \
+              -print \
+              2>/dev/null \
               | sort
           )
 
@@ -1426,7 +1414,12 @@ jobs:
 
             echo "::error::Release 构建成功，但没有找到 APK 文件"
 
-            echo
-            echo "outputs："
 
-            find "$PROJECT_ROOT/
+            echo
+            echo "完整 outputs："
+
+            find "$PROJECT_ROOT/app/build/outputs" \
+              -maxdepth 12 \
+              -print \
+              2>/dev/null \
+      

@@ -25,7 +25,7 @@ jobs:
           fetch-depth: 0
 
       # ============================================================
-      # 2. 解压源码 ZIP（如存在）
+      # 2. 解压源码 ZIP
       # ============================================================
       - name: Extract Source ZIP
         shell: bash
@@ -50,20 +50,22 @@ jobs:
           echo "📂 解压后顶层内容："
           ls -la "$TMP_DIR"
 
-          # 找到真正含 settings.gradle(.kts) 的目录
-          SRC_ROOT="$(
+          # 关键修复：先取完整文件路径，再用 dirname 取目录
+          SETTINGS_FILE="$(
             find "$TMP_DIR" -maxdepth 3 \
               \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
-              -printf '%h\n' -print -quit
+              -print -quit
           )"
 
-          if [ -z "${SRC_ROOT:-}" ]; then
+          if [ -z "${SETTINGS_FILE:-}" ]; then
             echo "❌ 解压后仍找不到 settings.gradle(.kts)"
             find "$TMP_DIR" -maxdepth 4 -type f | sort | head -50
             exit 1
           fi
 
+          SRC_ROOT="$(dirname "$SETTINGS_FILE")"
           echo "✅ 源码根目录: $SRC_ROOT"
+
           echo "📤 拷贝到仓库根目录..."
           cp -a "$SRC_ROOT"/. .
 
@@ -200,7 +202,6 @@ jobs:
           echo "✅ sdkmanager: $SDKMANAGER"
 
           # ---------- 安装所需 SDK 组件 ----------
-          # 注意：不加 --licenses，也不用 yes |，license 已手动 seed
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
             "platform-tools" \
             "platforms;android-35" \
@@ -257,7 +258,7 @@ jobs:
           echo "✅ Clean 完成"
 
       # ============================================================
-      # 9. 构建 Debug APK（保留退出码 + 保存完整日志）
+      # 9. 构建 Debug APK
       # ============================================================
       - name: Build Debug APK
         id: build_apk

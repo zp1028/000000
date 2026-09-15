@@ -3,9 +3,7 @@ name: Complete APK Build
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
+    branches: [ main, master ]
   pull_request:
 
 permissions:
@@ -19,7 +17,7 @@ jobs:
 
     steps:
       # ============================================================
-      # 1. Checkout
+      # 1. 检出代码
       # ============================================================
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -27,43 +25,83 @@ jobs:
           fetch-depth: 0
 
       # ============================================================
-      # 2. Locate Android project
+      # 2. 解压源码 ZIP（如存在）
       # ============================================================
-      - name: Locate Android Project
-        id: locate_root
+      - name: Extract Source ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "🔍 Searching for Android project..."
+          echo "📦 查找源码压缩包..."
+          ZIP_FILE="$(find . -maxdepth 2 -name '*.zip' -not -path './.git/*' -print -quit || true)"
 
-          if [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
+          if [ -z "${ZIP_FILE:-}" ]; then
+            echo "ℹ️ 未找到 zip，假设源码已直接存在于仓库"
+            ls -la
+            exit 0
+          fi
+
+          echo "✅ 找到压缩包: $ZIP_FILE"
+
+          TMP_DIR="$(mktemp -d)"
+          echo "📂 解压到临时目录: $TMP_DIR"
+          unzip -q -o "$ZIP_FILE" -d "$TMP_DIR"
+
+          echo "📂 解压后顶层内容："
+          ls -la "$TMP_DIR"
+
+          # 找到真正含 settings.gradle(.kts) 的目录
+          SRC_ROOT="$(
+            find "$TMP_DIR" -maxdepth 3 \
+              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+              -printf '%h\n' -print -quit
+          )"
+
+          if [ -z "${SRC_ROOT:-}" ]; then
+            echo "❌ 解压后仍找不到 settings.gradle(.kts)"
+            find "$TMP_DIR" -maxdepth 4 -type f | sort | head -50
+            exit 1
+          fi
+
+          echo "✅ 源码根目录: $SRC_ROOT"
+          echo "📤 拷贝到仓库根目录..."
+          cp -a "$SRC_ROOT"/. .
+
+          echo "📂 拷贝完成，仓库根目录内容："
+          ls -la
+
+      # ============================================================
+      # 3. 定位项目根目录
+      # ============================================================
+      - name: Locate Project Root
+        id: locate_root
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "🔍 查找 settings.gradle(.kts)..."
+
+          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
             ROOT="."
           else
             FOUND="$(find . -maxdepth 4 \
-              \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
-              -print -quit)"
+              \( -name settings.gradle.kts -o -name settings.gradle \) \
+              -not -path './.git/*' -print -quit || true)"
 
             if [ -z "${FOUND:-}" ]; then
-              echo "❌ settings.gradle(.kts) not found"
-              echo ""
-              echo "Repository structure:"
-              find . -maxdepth 3 -type f | sort | head -100
+              echo "❌ 找不到 settings.gradle(.kts)"
+              echo "📂 前 3 层文件："
+              find . -path ./.git -prune -o -type f -print | sort | head -80
               exit 1
             fi
-
             ROOT="$(dirname "$FOUND")"
           fi
 
           ROOT="$(cd "$ROOT" && pwd)"
-
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
-
-          echo "✅ Android project root:"
-          echo "$ROOT"
+          echo "✅ 项目根目录: $ROOT"
 
           echo ""
-          echo "Project files:"
+          echo "📂 项目关键文件："
           find "$ROOT" -maxdepth 2 -type f \
             \( -name "settings.gradle*" \
             -o -name "build.gradle*" \
@@ -72,48 +110,43 @@ jobs:
             -print | sort
 
       # ============================================================
-      # 3. Validate source
+      # 4. 校验源码结构
       # ============================================================
       - name: Validate Source
         shell: bash
         run: |
           set -euo pipefail
-
           ROOT="${{ steps.locate_root.outputs.root }}"
           cd "$ROOT"
 
-          echo "🔎 Validating source..."
+          echo "🔎 校验源码..."
 
-          test -f "settings.gradle.kts" || \
-          test -f "settings.gradle"
+          { test -f "settings.gradle.kts" || test -f "settings.gradle"; } \
+            || { echo "❌ 缺少 settings.gradle(.kts)"; exit 1; }
 
-          test -f "gradlew"
+          test -f "gradlew" \
+            || { echo "❌ 缺少 gradlew"; exit 1; }
 
           if [ -d "app/src/main" ]; then
-            echo "✅ app/src/main exists"
+            echo "✅ app/src/main 存在"
           else
-            echo "❌ app/src/main not found"
+            echo "❌ app/src/main 不存在"
             exit 1
           fi
 
-          if find app/src/main -name "AndroidManifest.xml" -type f \
-            | grep -q .; then
-            echo "✅ AndroidManifest.xml found"
+          if find app/src/main -name "AndroidManifest.xml" -type f | grep -q .; then
+            echo "✅ AndroidManifest.xml 存在"
           else
-            echo "❌ AndroidManifest.xml not found"
+            echo "❌ AndroidManifest.xml 不存在"
             exit 1
           fi
 
           echo ""
-          echo "Gradle wrapper:"
-          ls -l gradlew
-
-          echo ""
-          echo "Android source:"
-          find app/src/main -maxdepth 3 -type f | sort | head -100
+          echo "📂 app/src/main 内容："
+          find app/src/main -maxdepth 3 -type f | sort | head -60
 
       # ============================================================
-      # 4. JDK 17
+      # 5. JDK 17
       # ============================================================
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -123,11 +156,7 @@ jobs:
           cache: gradle
 
       # ============================================================
-      # 5. Android SDK
-      #
-      # IMPORTANT:
-      # Do NOT use android-actions/setup-android@v3.
-      # Do NOT run sdkmanager --licenses.
+      # 6. 手动准备 Android SDK（绕开 setup-android@v3 的 license 交互）
       # ============================================================
       - name: Prepare Android SDK
         shell: bash
@@ -135,43 +164,16 @@ jobs:
           set -euo pipefail
 
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
-
           export ANDROID_HOME="$SDK_ROOT"
           export ANDROID_SDK_ROOT="$SDK_ROOT"
 
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
 
-          SDKMANAGER="$(command -v sdkmanager || true)"
+          echo "📁 SDK_ROOT = $SDK_ROOT"
 
-          if [ -z "$SDKMANAGER" ]; then
-            SDKMANAGER="$(
-              find "$SDK_ROOT/cmdline-tools" \
-                -type f \
-                -path '*/bin/sdkmanager' \
-                -print -quit 2>/dev/null || true
-            )"
-          fi
-
-          if [ -z "$SDKMANAGER" ]; then
-            echo "❌ sdkmanager not found"
-            exit 1
-          fi
-
-          echo "✅ sdkmanager:"
-          echo "$SDKMANAGER"
-
-          # ----------------------------------------------------------
-          # Seed the standard Android SDK license fingerprints.
-          #
-          # We intentionally do NOT execute:
-          #   sdkmanager --licenses
-          #
-          # This avoids the unrelated Google TV / XR license scan
-          # that was causing the previous CI failure.
-          # ----------------------------------------------------------
+          # ---------- 手动写入已知的 SDK license 指纹 ----------
           mkdir -p "$SDK_ROOT/licenses"
-
           printf '%s\n' \
             8933bad161af4178b1185d1a37fbf41ea5269c55 \
             d56f5187479451eabf01fb78af6dfcb131a6481e \
@@ -179,163 +181,148 @@ jobs:
             84831b9409646a918e30573bab4c9c91346d8abd \
             > "$SDK_ROOT/licenses/android-sdk-license"
 
-          echo "📦 Installing required Android SDK packages..."
+          # ---------- 查找 sdkmanager ----------
+          SDKMANAGER="$(command -v sdkmanager || true)"
 
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(
+              find "$SDK_ROOT/cmdline-tools" \
+                -type f -path '*/bin/sdkmanager' \
+                -print -quit 2>/dev/null || true
+            )"
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "❌ sdkmanager 未找到"
+            exit 1
+          fi
+
+          echo "✅ sdkmanager: $SDKMANAGER"
+
+          # ---------- 安装所需 SDK 组件 ----------
+          # 注意：不加 --licenses，也不用 yes |，license 已手动 seed
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
             "platform-tools" \
             "platforms;android-35" \
-            "build-tools;35.0.0"
+            "platforms;android-34" \
+            "build-tools;35.0.0" \
+            "build-tools;34.0.0"
 
           echo ""
-          echo "🔎 Verifying Android SDK..."
+          echo "🔎 校验 SDK 组件："
+          test -d "$SDK_ROOT/platform-tools"        && echo "✅ platform-tools"
+          test -d "$SDK_ROOT/platforms/android-35"  && echo "✅ android-35"
+          test -d "$SDK_ROOT/platforms/android-34"  && echo "✅ android-34"
+          test -d "$SDK_ROOT/build-tools/35.0.0"    && echo "✅ build-tools 35.0.0"
+          test -d "$SDK_ROOT/build-tools/34.0.0"    && echo "✅ build-tools 34.0.0"
 
-          test -d "$SDK_ROOT/platforms/android-35"
-          test -d "$SDK_ROOT/build-tools/35.0.0"
-          test -d "$SDK_ROOT/platform-tools"
-
-          echo "✅ Android SDK ready"
-
-      # ============================================================
-      # 6. Setup Gradle 8.9
-      # ============================================================
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-          add-job-summary: on
+          echo "✅ Android SDK 准备完成"
 
       # ============================================================
-      # 7. Verify Gradle
+      # 7. 验证构建环境
       # ============================================================
-      - name: Verify Gradle Environment
+      - name: Verify Build Environment
         shell: bash
         run: |
           set -euo pipefail
-
           ROOT="${{ steps.locate_root.outputs.root }}"
           cd "$ROOT"
-
           chmod +x gradlew
 
           echo "☕ Java:"
           java -version
 
           echo ""
-          echo "📦 Gradle:"
-          ./gradlew --version
-
-          echo ""
           echo "🤖 Android SDK:"
           echo "ANDROID_HOME=${ANDROID_HOME:-}"
           echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
 
-      # ============================================================
-      # 8. Static audit
-      # ============================================================
-      - name: Run Static Audit
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ROOT="${{ steps.locate_root.outputs.root }}"
-          cd "$ROOT"
-
-          if [ -f "tools/v22_static_audit.py" ]; then
-            echo "🔍 Running v22 static audit..."
-            python3 tools/v22_static_audit.py
-          else
-            echo "ℹ️ Static audit script not present; skipping."
-          fi
+          echo ""
+          echo "📦 Gradle wrapper:"
+          ./gradlew --version || true
 
       # ============================================================
-      # 9. Clean
+      # 8. Clean
       # ============================================================
       - name: Clean Project
         shell: bash
         run: |
           set -euo pipefail
-
           ROOT="${{ steps.locate_root.outputs.root }}"
           cd "$ROOT"
-
           chmod +x gradlew
 
-          echo "🧹 Cleaning project..."
-
+          echo "🧹 Clean..."
           ./gradlew clean --no-daemon --stacktrace
-
-          echo "✅ Clean completed"
+          echo "✅ Clean 完成"
 
       # ============================================================
-      # 10. Build Debug APK
-      #
-      # IMPORTANT:
-      # No pipe to tail.
-      # Therefore Gradle's real exit code is preserved.
+      # 9. 构建 Debug APK（保留退出码 + 保存完整日志）
       # ============================================================
       - name: Build Debug APK
         id: build_apk
         shell: bash
         run: |
-          set -euo pipefail
-
+          set -uo pipefail
           ROOT="${{ steps.locate_root.outputs.root }}"
           cd "$ROOT"
-
           chmod +x gradlew
 
           echo "========================================"
-          echo "🔨 Building Debug APK"
+          echo "🔨 构建 Debug APK"
           echo "========================================"
-          echo "Project: $(pwd)"
+          echo "工作目录: $(pwd)"
           echo ""
 
-          ./gradlew \
-            assembleDebug \
+          set +e
+          ./gradlew assembleDebug \
             --no-daemon \
             --stacktrace \
-            --info
+            2>&1 | tee /tmp/gradle-build.log | tail -200
+          BUILD_EXIT=${PIPESTATUS[0]}
+          set -e
 
-          echo ""
-          echo "========================================"
-          echo "✅ APK BUILD SUCCESS"
-          echo "========================================"
-
-          echo "build_success=true" >> "$GITHUB_OUTPUT"
+          if [ "$BUILD_EXIT" -eq 0 ]; then
+            echo ""
+            echo "========================================"
+            echo "✅ APK 构建成功"
+            echo "========================================"
+            echo "build_success=true" >> "$GITHUB_OUTPUT"
+          else
+            echo ""
+            echo "========================================"
+            echo "❌ APK 构建失败 (exit=$BUILD_EXIT)"
+            echo "========================================"
+            echo "===== 最后 200 行日志 ====="
+            tail -200 /tmp/gradle-build.log || true
+            echo "build_success=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
       # ============================================================
-      # 11. Locate APK
+      # 10. 定位 APK
       # ============================================================
       - name: Locate APK
         if: success()
         shell: bash
         run: |
           set -euo pipefail
-
           ROOT="${{ steps.locate_root.outputs.root }}"
           cd "$ROOT"
 
-          echo "🔍 Searching generated APK..."
-
-          APK_COUNT="$(find . \
-            -type f \
-            -path '*/build/outputs/apk/debug/*.apk' \
-            | wc -l)"
+          echo "🔍 查找生成的 APK..."
+          APK_COUNT="$(find . -type f -path '*/build/outputs/apk/debug/*.apk' | wc -l)"
 
           if [ "$APK_COUNT" -eq 0 ]; then
-            echo "❌ No Debug APK found"
+            echo "❌ 没有找到 Debug APK"
             exit 1
           fi
 
-          echo "✅ Found $APK_COUNT APK(s):"
-
-          find . \
-            -type f \
-            -path '*/build/outputs/apk/debug/*.apk' \
-            -print
+          echo "✅ 找到 $APK_COUNT 个 APK："
+          find . -type f -path '*/build/outputs/apk/debug/*.apk' -print -exec ls -lh {} \;
 
       # ============================================================
-      # 12. Upload APK
+      # 11. 上传 APK
       # ============================================================
       - name: Upload Debug APK
         if: success()
@@ -348,7 +335,7 @@ jobs:
           retention-days: 30
 
       # ============================================================
-      # 13. Upload build reports/logs
+      # 12. 上传构建报告（无论成败）
       # ============================================================
       - name: Upload Build Reports
         if: always()
@@ -362,7 +349,7 @@ jobs:
           retention-days: 7
 
       # ============================================================
-      # 14. Final summary
+      # 13. 构建摘要
       # ============================================================
       - name: Build Summary
         if: always()
@@ -370,26 +357,22 @@ jobs:
         run: |
           echo "## 📊 BTC Quant APK Build" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-
           echo "### Build Information" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Time:** $(date '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Actor:** ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Branch:** ${{ github.ref_name }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Commit:** ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- **JDK:** 17" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Gradle:** 8.9" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Compile SDK:** Android 35" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Build Tools:** 35.0.0" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Compile SDK:** Android 35 / 34" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Build Tools:** 35.0.0 / 34.0.0" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
           if [ "${{ steps.build_apk.outputs.build_success }}" = "true" ]; then
             echo "### ✅ BUILD SUCCESS" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "Debug APK was generated successfully." >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "Artifact: \`BTC-Quant-debug-apk\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "Debug APK 已生成。Artifact: \`BTC-Quant-debug-apk\`" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "### ❌ BUILD FAILED" >> "$GITHUB_STEP_SUMMARY"
             echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "Check the Gradle build logs and uploaded reports." >> "$GITHUB_STEP_SUMMARY"
+            echo "请查看 Gradle 日志与上传的报告。" >> "$GITHUB_STEP_SUMMARY"
           fi

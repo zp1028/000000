@@ -223,6 +223,7 @@ jobs:
 
       # ============================================================
       # 10. 构建 Debug APK
+      #     —— 失败时提取真正的 Kotlin / Gradle 错误 ——
       # ============================================================
       - name: Build Debug APK
         id: build_apk
@@ -243,20 +244,78 @@ jobs:
           ./gradlew assembleDebug \
             --no-daemon \
             --stacktrace \
-            2>&1 | tee /tmp/gradle-build.log | tail -200
+            2>&1 | tee /tmp/gradle-build.log
           BUILD_EXIT=${PIPESTATUS[0]}
           set -e
 
+          # ---------- 提取真正的编译错误 ----------
+          echo ""
+          echo "========================================"
+          echo "📋 Kotlin / Java 编译错误摘要"
+          echo "========================================"
+
+          grep -nE '^e: ' /tmp/gradle-build.log > /tmp/kotlin-errors.txt || true
+          grep -nE '^.*error: |FAILURE: |What went wrong|> Task .* FAILED|> Could not|> A problem occurred' \
+            /tmp/gradle-build.log > /tmp/gradle-errors.txt || true
+
+          if [ -s /tmp/kotlin-errors.txt ]; then
+            echo ""
+            echo "🔥 Kotlin 编译错误（共 $(wc -l < /tmp/kotlin-errors.txt) 行）："
+            echo "----------------------------------------"
+            head -100 /tmp/kotlin-errors.txt
+            echo "----------------------------------------"
+          fi
+
+          if [ -s /tmp/gradle-errors.txt ]; then
+            echo ""
+            echo "🔥 Gradle / Java 错误："
+            echo "----------------------------------------"
+            head -60 /tmp/gradle-errors.txt
+            echo "----------------------------------------"
+          fi
+
+          echo ""
+          echo "📌 What went wrong 段："
+          awk '/\* What went wrong:/{flag=1} flag{print} /^\* Try:/{flag=0}' \
+            /tmp/gradle-build.log | head -80 || true
+
+          echo ""
+          echo "📌 失败的任务："
+          grep -E '> Task .* FAILED' /tmp/gradle-build.log || true
+
+          if [ ! -s /tmp/kotlin-errors.txt ] && [ ! -s /tmp/gradle-errors.txt ]; then
+            echo ""
+            echo "⚠️  未匹配到常见错误模式，打印日志前 300 行："
+            head -300 /tmp/gradle-build.log
+          fi
+
+          echo ""
+          echo "📌 日志最后 100 行（兜底）："
+          tail -100 /tmp/gradle-build.log || true
+
+          # ---------- 退出码 ----------
           if [ "$BUILD_EXIT" -eq 0 ]; then
+            echo ""
             echo "✅ APK 构建成功"
             echo "build_success=true" >> "$GITHUB_OUTPUT"
           else
+            echo ""
             echo "❌ APK 构建失败 (exit=$BUILD_EXIT)"
-            echo "===== 最后 200 行日志 ====="
-            tail -200 /tmp/gradle-build.log || true
             echo "build_success=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
+
+      # ============================================================
+      # 10.5 上传 Gradle 完整日志（无论成败）
+      # ============================================================
+      - name: Upload Gradle Full Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-full-log
+          path: /tmp/gradle-build.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       # ============================================================
       # 11. 定位 APK
@@ -324,5 +383,15 @@ jobs:
             echo "Debug APK: \`BTC-Quant-debug-apk\`" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "### ❌ BUILD FAILED" >> "$GITHUB_STEP_SUMMARY"
-            echo "查看 Gradle 日志与上传的报告。" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "完整日志见 Artifact: \`gradle-full-log\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### 🔥 Kotlin 编译错误" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            if [ -f /tmp/kotlin-errors.txt ]; then
+              head -50 /tmp/kotlin-errors.txt >> "$GITHUB_STEP_SUMMARY" || true
+            else
+              echo "(未捕获到 ^e: 错误行，请下载 gradle-full-log 查看)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
